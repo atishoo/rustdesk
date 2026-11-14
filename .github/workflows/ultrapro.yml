@@ -79,7 +79,7 @@ jobs:
 
   build-macos:
     name: macOS arm64 client
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -131,4 +131,62 @@ jobs:
         with:
           name: rustdesk-client-macos-arm64
           path: rustdesk-client-macos-arm64.tar.gz
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows x86_64 client
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: 15.0.6
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install multimedia dependencies
+        env:
+          VCPKG_DEFAULT_TRIPLET: x64-windows-static
+        shell: bash
+        run: $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Windows client
+        shell: bash
+        run: |
+          python3 res/inline-sciter.py
+          cargo build --locked --release --features inline,vram,hwcodec --bins
+
+      - name: Package Windows client
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/rustdesk | Out-Null
+          Copy-Item target/release/rustdesk.exe dist/rustdesk/rustdesk.exe
+          Copy-Item target/release/service.exe dist/rustdesk/service.exe
+          Copy-Item target/release/naming.exe dist/rustdesk/naming.exe
+          Invoke-WebRequest -Uri https://github.com/c-smile/sciter-sdk/raw/master/bin.win/x64/sciter.dll -OutFile dist/rustdesk/sciter.dll
+          @'
+          @echo off
+          "%~dp0rustdesk.exe" %*
+          '@ | Set-Content -Encoding ascii dist/rustdesk/run-rustdesk.cmd
+          Compress-Archive -Path dist/rustdesk -DestinationPath rustdesk-client-windows-x86_64.zip -Force
+
+      - name: Upload Windows client
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-client-windows-x86_64
+          path: rustdesk-client-windows-x86_64.zip
           if-no-files-found: error
