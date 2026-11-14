@@ -1,0 +1,134 @@
+name: UltraPro client
+
+on:
+  push:
+    branches:
+      - ultrapro
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  VCPKG_COMMIT_ID: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+
+jobs:
+  build-linux:
+    name: Linux x86_64 client
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake curl gcc g++ git libasound2-dev libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev libgtk-3-dev libpulse-dev libva-dev \
+            libvdpau-dev libxcb-randr0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxdo-dev libxfixes-dev nasm wget
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install multimedia dependencies
+        run: $VCPKG_ROOT/vcpkg install --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Linux client
+        run: |
+          python3 res/inline-sciter.py
+          cargo build --locked --release --features inline,hwcodec --bins
+
+      - name: Package Linux client
+        run: |
+          mkdir -p dist/rustdesk
+          install -m 0755 target/release/rustdesk dist/rustdesk/rustdesk
+          install -m 0755 target/release/service dist/rustdesk/service
+          install -m 0755 target/release/naming dist/rustdesk/naming
+          curl -fL https://github.com/c-smile/sciter-sdk/raw/master/bin.lnx/x64/libsciter-gtk.so \
+            -o dist/rustdesk/libsciter-gtk.so
+          cat > dist/rustdesk/run-rustdesk <<'EOF'
+          #!/bin/sh
+          set -eu
+          root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          export LD_LIBRARY_PATH="$root${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          exec "$root/rustdesk" "$@"
+          EOF
+          chmod 0755 dist/rustdesk/run-rustdesk
+          tar -C dist -czf rustdesk-client-linux-x86_64.tar.gz rustdesk
+
+      - name: Upload Linux client
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-client-linux-x86_64
+          path: rustdesk-client-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  build-macos:
+    name: macOS arm64 client
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install macOS dependencies
+        run: brew install llvm nasm yasm pkg-config
+
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+
+      - name: Install multimedia dependencies
+        run: $VCPKG_ROOT/vcpkg install --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build macOS client
+        run: |
+          python3 res/inline-sciter.py
+          cargo build --locked --release --features inline --bins
+
+      - name: Package macOS client
+        run: |
+          mkdir -p dist/rustdesk
+          install -m 0755 target/release/rustdesk dist/rustdesk/rustdesk
+          install -m 0755 target/release/service dist/rustdesk/service
+          install -m 0755 target/release/naming dist/rustdesk/naming
+          curl -fL https://github.com/c-smile/sciter-sdk/raw/master/bin.osx/libsciter.dylib \
+            -o dist/rustdesk/libsciter.dylib
+          cat > dist/rustdesk/run-rustdesk <<'EOF'
+          #!/bin/sh
+          set -eu
+          root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          export DYLD_LIBRARY_PATH="$root${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          exec "$root/rustdesk" "$@"
+          EOF
+          chmod 0755 dist/rustdesk/run-rustdesk
+          tar -C dist -czf rustdesk-client-macos-arm64.tar.gz rustdesk
+
+      - name: Upload macOS client
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-client-macos-arm64
+          path: rustdesk-client-macos-arm64.tar.gz
+          if-no-files-found: error

@@ -2989,7 +2989,7 @@ impl LoginConfigHandler {
         self.peer_relay =
             config::option2bool("force-always-relay", &self.get_option("force-always-relay"))
                 || force_relay;
-        self.policy_relay = self.peer_relay || Config::is_proxy();
+        self.policy_relay = self.peer_relay || Config::is_proxy() || crate::is_udp_disabled();
         self.force_relay = self.policy_relay || use_ws();
         if let Some((real_id, server, key)) = &self.other_server {
             let other_server_key = self.get_option("other-server-key");

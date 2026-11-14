@@ -500,6 +500,12 @@ impl RendezvousMediator {
                             if fails >= MAX_FAILS2 {
                                 Config::update_latency(&host, -1);
                                 old_latency = 0;
+                                let no_recent_response = last_register_resp
+                                    .map(|x| x.elapsed().as_millis() as i64 > MAX_REG_TIMEOUT)
+                                    .unwrap_or(true);
+                                if no_recent_response {
+                                    bail!("UDP rendezvous registration timed out");
+                                }
                                 if last_dns_check.elapsed().as_millis() as i64 > DNS_INTERVAL {
                                     // in some case of network reconnect (dial IP network),
                                     // old UDP socket not work any more after network recover
@@ -550,6 +556,7 @@ impl RendezvousMediator {
                         NEEDS_DEPLOY.store(false, Ordering::SeqCst);
                         #[cfg(target_os = "android")]
                         reset_needs_deploy_notification();
+                        self.register_peer(sink).await?;
                     }
                     Ok(register_pk_response::Result::UUID_MISMATCH) => {
                         self.handle_uuid_mismatch(sink).await?;
@@ -631,7 +638,7 @@ impl RendezvousMediator {
         log::info!("start tcp: {}", hbb_common::websocket::check_ws(&host));
         let mut conn = connect_tcp(host.clone(), CONNECT_TIMEOUT).await?;
         let key = crate::get_key(true).await;
-        crate::secure_tcp(&mut conn, &key).await?;
+        crate::secure_tcp_required(&mut conn, &key).await?;
         let mut rz = Self {
             addr: conn.local_addr().into_target_addr()?,
             host: host.clone(),
@@ -640,6 +647,7 @@ impl RendezvousMediator {
         };
         let mut timer = crate::rustdesk_interval(interval(crate::TIMER_OUT));
         let mut last_register_sent: Option<Instant> = None;
+        let mut last_peer_sent: Option<Instant> = None;
         let mut last_recv_msg = Instant::now();
         // we won't support connecting to multiple rendzvous servers any more, so we can use a global variable here.
         Config::set_host_key_confirmed(&rz.host_prefix, false);
@@ -677,6 +685,15 @@ impl RendezvousMediator {
                         last_register_sent.map(|x| x.elapsed().as_millis() as i64).unwrap_or(REG_INTERVAL) >= REG_INTERVAL {
                         rz.register_pk(Sink::Stream(&mut conn)).await?;
                         last_register_sent = Some(Instant::now());
+                    } else if Config::get_key_confirmed()
+                        && Config::get_host_key_confirmed(&rz.host_prefix)
+                        && last_peer_sent
+                            .map(|x| x.elapsed().as_millis() as i64)
+                            .unwrap_or(REG_INTERVAL)
+                            >= REG_INTERVAL
+                    {
+                        rz.register_peer(Sink::Stream(&mut conn)).await?;
+                        last_peer_sent = Some(Instant::now());
                     }
                 }
             }
@@ -694,7 +711,13 @@ impl RendezvousMediator {
         {
             Self::start_tcp(server, host).await
         } else {
-            Self::start_udp(server, host).await
+            match Self::start_udp(server.clone(), host.clone()).await {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    log::warn!("UDP rendezvous unavailable, retrying over TCP: {}", err);
+                    Self::start_tcp(server, host).await
+                }
+            }
         }
     }
 
