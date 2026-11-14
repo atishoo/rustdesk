@@ -150,13 +150,17 @@ jobs:
       - name: Set up vcpkg
         uses: lukka/run-vcpkg@v11
         with:
+          vcpkgDirectory: C:\vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
 
       - name: Install multimedia dependencies
         env:
-          VCPKG_DEFAULT_TRIPLET: x64-windows-static
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
         shell: bash
-        run: $VCPKG_ROOT/vcpkg install --triplet x64-windows-static --x-install-root="$VCPKG_ROOT/installed"
+        run: |
+          $VCPKG_ROOT/vcpkg install \
+            --triplet x64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
