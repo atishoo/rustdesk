@@ -1,0 +1,19 @@
+name: UltraPro official release
+
+on:
+  push:
+    branches:
+      - ultrapro
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-official-release:
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: ultrapro
+      publish-update-metadata: false
