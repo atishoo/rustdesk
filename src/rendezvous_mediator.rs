@@ -636,10 +636,10 @@ impl RendezvousMediator {
     pub async fn start_tcp(server: ServerPtr, host: String) -> ResultType<()> {
         let host = check_port(&host, RENDEZVOUS_PORT);
         log::info!("start tcp: {}", hbb_common::websocket::check_ws(&host));
+        // Official hbbs accepts the rendezvous registration frame first. It does not
+        // initiate a stream key exchange on this socket, so waiting for one here makes
+        // TCP-only clients fail with `deadline has elapsed` before they can register.
         let mut conn = connect_tcp(host.clone(), CONNECT_TIMEOUT).await?;
-        let key = crate::get_key(true).await;
-        // Keep compatibility with official hbbs endpoints without a key exchange.
-        crate::secure_tcp(&mut conn, &key).await?;
         let mut rz = Self {
             addr: conn.local_addr().into_target_addr()?,
             host: host.clone(),

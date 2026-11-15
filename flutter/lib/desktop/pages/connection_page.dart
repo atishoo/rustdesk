@@ -35,6 +35,7 @@ class OnlineStatusWidget extends StatefulWidget {
 class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   final _svcStopped = Get.find<RxBool>(tag: 'stop-service');
   final _svcIsUsingPublicServer = true.obs;
+  final _svcServerInfoReady = false.obs;
   Timer? _updateTimer;
 
   double get em => 14.0;
@@ -155,14 +156,19 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
 
   _buildConnStatusMsg() {
     widget.onSvcStatusChanged?.call();
+    final status = stateGlobal.svcStatus.value;
     return Text(
       _svcStopped.value
           ? translate("Service is not running")
-          : stateGlobal.svcStatus.value == SvcStatus.connecting
+          : status == SvcStatus.connecting
               ? translate("connecting_status")
-              : stateGlobal.svcStatus.value == SvcStatus.notReady
+              : status == SvcStatus.notReady
                   ? translate("not_ready_status")
-                  : translate('Ready'),
+                  : !_svcServerInfoReady.value
+                      ? translate("connecting_status")
+                      : _svcIsUsingPublicServer.value
+                          ? translate('public_server_status')
+                          : translate('Ready'),
       style: TextStyle(fontSize: em),
     );
   }
@@ -181,6 +187,7 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
       stateGlobal.svcStatus.value = SvcStatus.notReady;
     }
     _svcIsUsingPublicServer.value = await bind.mainIsUsingPublicServer();
+    _svcServerInfoReady.value = true;
     try {
       stateGlobal.videoConnCount.value = status['video_conn_count'] as int;
     } catch (_) {}

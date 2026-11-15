@@ -864,7 +864,6 @@ impl Client {
         // Counted from before the key exchange, so the exchange spends the UDP NAT test's own
         // wait rather than replacing it: the test runs beside both.
         let udp_nat_wait_from = Instant::now();
-        let mut exchanged = false;
         if carries_offer {
             // An offer puts both sides' ICE candidates, every interface address of both
             // machines, on this socket, so it goes out only once the server's key exchange has
@@ -873,7 +872,7 @@ impl Client {
             // socket since the failed exchange may have consumed a message on this one. Degrade
             // to no WebRTC, never to WebRTC signalling in the clear.
             match secure_tcp_required(&mut socket, &key).await {
-                Ok(()) => exchanged = true,
+                Ok(()) => {}
                 Err(err) => {
                     log::warn!(
                         "WebRTC signalling to {} cannot be encrypted, punching without WebRTC: {}",
@@ -885,11 +884,6 @@ impl Client {
                     my_addr = socket.local_addr();
                 }
             }
-        }
-        if !exchanged && legacy_secure {
-            secure_tcp(&mut socket, &key)
-                .await
-                .map_err(|e| anyhow!("Failed to secure tcp: {}", e))?;
         }
         // A token or switch code has always taken this socket straight to the punch without
         // waiting for the UDP NAT test. The WebRTC exchange does not replace that wait, it only
@@ -1806,10 +1800,6 @@ impl Client {
             let mut socket = connect_tcp(rendezvous_server, CONNECT_TIMEOUT)
                 .await
                 .with_context(|| "Failed to connect to rendezvous server")?;
-
-            if !key.is_empty() && (!token.is_empty() || !switch_code.is_empty()) {
-                secure_tcp(&mut socket, key).await?;
-            }
 
             ipv4 = socket.local_addr().is_ipv4();
             let mut msg_out = RendezvousMessage::new();
