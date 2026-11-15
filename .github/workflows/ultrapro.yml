@@ -37,12 +37,27 @@ jobs:
             --pattern 'rustdesk-*-x86_64.dmg' \
             --dir "$work"
 
+          mount_point_from_plist() {
+            python3 - "$1" <<'PY'
+          import plistlib
+          import sys
+
+          with open(sys.argv[1], "rb") as handle:
+              plist = plistlib.load(handle)
+          for entity in plist.get("system-entities", []):
+              mount_point = entity.get("mount-point")
+              if mount_point:
+                  print(mount_point)
+                  break
+          PY
+          }
+
           for arch in aarch64 x86_64; do
             input=$(find "$work" -maxdepth 1 -name "rustdesk-*-${arch}.dmg" -print -quit)
             test -n "$input"
             plist="$work/${arch}.plist"
             hdiutil attach -readonly -nobrowse -plist "$input" > "$plist"
-            mount_point=$(plutil -extract system-entities.0.mount-point raw -o - "$plist")
+            mount_point=$(mount_point_from_plist "$plist")
             app="$work/RustDesk-${arch}.app"
             ditto "$mount_point/RustDesk.app" "$app"
             hdiutil detach "$mount_point" >/dev/null
@@ -56,6 +71,11 @@ jobs:
             ditto "$app" "$staging/RustDesk.app"
             ln -s /Applications "$staging/Applications"
             hdiutil create -volname RustDesk -srcfolder "$staging" -ov -format UDZO "$fixed"
+            verify_plist="$work/${arch}-fixed.plist"
+            hdiutil attach -readonly -nobrowse -plist "$fixed" > "$verify_plist"
+            verify_mount=$(mount_point_from_plist "$verify_plist")
+            codesign --verify --deep --strict "$verify_mount/RustDesk.app"
+            hdiutil detach "$verify_mount" >/dev/null
             mv "$input" "$work/original-${arch}.dmg"
             mv "$fixed" "$input"
             gh release upload ultrapro "$input" \
