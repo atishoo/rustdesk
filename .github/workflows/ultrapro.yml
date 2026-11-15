@@ -18,3 +18,51 @@ jobs:
       upload-artifact: true
       upload-tag: ultrapro
       publish-update-metadata: false
+
+  repair-macos-dmgs:
+    needs: build-official-release
+    if: ${{ needs.build-official-release.result == 'success' }}
+    runs-on: macos-latest
+    steps:
+      - name: Install DMG tooling
+        run: brew install create-dmg
+
+      - name: Re-sign and publish macOS apps
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/rustdesk-macos-dmgs"
+          mkdir -p "$work"
+          gh release download ultrapro \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'rustdesk-*-aarch64.dmg' \
+            --pattern 'rustdesk-*-x86_64.dmg' \
+            --dir "$work"
+
+          for arch in aarch64 x86_64; do
+            input=$(find "$work" -maxdepth 1 -name "rustdesk-*-${arch}.dmg" -print -quit)
+            test -n "$input"
+            plist="$work/${arch}.plist"
+            hdiutil attach -readonly -nobrowse -plist "$input" > "$plist"
+            mount_point=$(plutil -extract system-entities.0.mount-point raw -o - "$plist")
+            app="$work/RustDesk-${arch}.app"
+            ditto "$mount_point/RustDesk.app" "$app"
+            hdiutil detach "$mount_point" >/dev/null
+
+            codesign --deep --force --verbose --sign - "$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+
+            fixed="$work/fixed-${arch}.dmg"
+            create-dmg \
+              --icon "RustDesk.app" 200 190 \
+              --hide-extension "RustDesk.app" \
+              --window-size 800 400 \
+              --app-drop-link 600 185 \
+              "$fixed" "$app"
+            mv "$input" "$work/original-${arch}.dmg"
+            mv "$fixed" "$input"
+            gh release upload ultrapro "$input" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          done
