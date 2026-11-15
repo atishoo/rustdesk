@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
 
+# Every push to ultrapro publishes the official client matrix artifacts.
 jobs:
   build-official-release:
     uses: ./.github/workflows/flutter-build.yml
