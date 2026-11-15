@@ -47,6 +47,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   var watchIsProcessTrust = false;
   var watchIsInputMonitoring = false;
   var watchIsCanRecordAudio = false;
+  bool? _screenRecordingGranted;
+  bool? _processTrusted;
+  bool? _inputMonitoringGranted;
   Timer? _updateTimer;
   bool isCardClosed = false;
 
@@ -732,6 +735,20 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           // Monitoring may not take effect until the process is restarted.
           // rustDeskWinManager.call(
           //     WindowType.RemoteDesktop, kWindowDisableGrabKeyboard, '');
+          setState(() {});
+        }
+      }
+      if (isMacOS) {
+        final screenRecording =
+            bind.mainIsCanScreenRecording(prompt: false);
+        final processTrusted = bind.mainIsProcessTrusted(prompt: false);
+        final inputMonitoring = bind.mainIsCanInputMonitoring(prompt: false);
+        if (_screenRecordingGranted != screenRecording ||
+            _processTrusted != processTrusted ||
+            _inputMonitoringGranted != inputMonitoring) {
+          _screenRecordingGranted = screenRecording;
+          _processTrusted = processTrusted;
+          _inputMonitoringGranted = inputMonitoring;
           setState(() {});
         }
       }

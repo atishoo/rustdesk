@@ -162,7 +162,12 @@ fn unsafe_is_can_screen_recording(prompt: bool) -> bool {
     // but also some said it has bug on 10.16, so we just use it on 11.0.
     unsafe {
         if CanUseNewApiForScreenCaptureCheck() == YES {
-            return IsCanScreenRecording(if prompt { YES } else { NO }) == YES;
+            // CGPreflightScreenCaptureAccess can remain stale for an already running
+            // process after the user grants access in System Settings. Keep the
+            // window-list check below as a fallback instead of returning early.
+            if IsCanScreenRecording(if prompt { YES } else { NO }) == YES {
+                return true;
+            }
         }
     }
     let mut can_record_screen: bool = false;
