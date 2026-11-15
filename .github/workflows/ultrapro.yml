@@ -24,6 +24,9 @@ jobs:
     if: ${{ needs.build-official-release.result == 'success' }}
     runs-on: macos-latest
     steps:
+      - name: Checkout signing script and entitlements
+        uses: actions/checkout@v4
+
       - name: Re-sign and publish macOS apps
         env:
           GH_TOKEN: ${{ github.token }}
@@ -62,8 +65,10 @@ jobs:
             ditto "$mount_point/RustDesk.app" "$app"
             hdiutil detach "$mount_point" >/dev/null
 
-            codesign --deep --force --verbose --sign - "$app"
-            codesign --verify --deep --strict --verbose=2 "$app"
+            bash "$GITHUB_WORKSPACE/.github/scripts/sign-macos-app.sh" \
+              "$app" \
+              - \
+              "$GITHUB_WORKSPACE/flutter/macos/Runner/Release.entitlements"
 
             fixed="$work/fixed-${arch}.dmg"
             staging="$work/staging-${arch}"
