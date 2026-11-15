@@ -638,9 +638,7 @@ impl RendezvousMediator {
         log::info!("start tcp: {}", hbb_common::websocket::check_ws(&host));
         let mut conn = connect_tcp(host.clone(), CONNECT_TIMEOUT).await?;
         let key = crate::get_key(true).await;
-        // hbbs' native TCP rendezvous endpoint still supports the legacy
-        // pre-exchange path; keep accepting it while using the encrypted
-        // exchange when the server offers one.
+        // Keep compatibility with hbbs endpoints that do not advertise a key exchange.
         crate::secure_tcp(&mut conn, &key).await?;
         let mut rz = Self {
             addr: conn.local_addr().into_target_addr()?,
