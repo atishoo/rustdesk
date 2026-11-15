@@ -24,9 +24,6 @@ jobs:
     if: ${{ needs.build-official-release.result == 'success' }}
     runs-on: macos-latest
     steps:
-      - name: Install DMG tooling
-        run: brew install create-dmg
-
       - name: Re-sign and publish macOS apps
         env:
           GH_TOKEN: ${{ github.token }}
@@ -54,12 +51,11 @@ jobs:
             codesign --verify --deep --strict --verbose=2 "$app"
 
             fixed="$work/fixed-${arch}.dmg"
-            create-dmg \
-              --icon "RustDesk.app" 200 190 \
-              --hide-extension "RustDesk.app" \
-              --window-size 800 400 \
-              --app-drop-link 600 185 \
-              "$fixed" "$app"
+            staging="$work/staging-${arch}"
+            mkdir "$staging"
+            ditto "$app" "$staging/RustDesk.app"
+            ln -s /Applications "$staging/Applications"
+            hdiutil create -volname RustDesk -srcfolder "$staging" -ov -format UDZO "$fixed"
             mv "$input" "$work/original-${arch}.dmg"
             mv "$fixed" "$input"
             gh release upload ultrapro "$input" \
