@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/hbbs/hbbs.dart';
@@ -22,6 +23,22 @@ class GroupModel {
   var initialized = false;
   var _cacheLoadOnceFlag = false;
   var _statusCode = 200;
+  var _pulling = false;
+  var _pullAgain = false;
+  var _queuedPullQuiet = true;
+  var _pullStale = false;
+  List<String>? _pullContext;
+
+  Future<bool> _pullIsCurrent() async {
+    final context = _pullContext;
+    if (context == null) return true;
+    final current = await bind.mainAccountRequestContext();
+    final valid = current[0] == context[0] &&
+        current[1] == context[1] &&
+        current[1].isNotEmpty;
+    if (!valid) _pullStale = true;
+    return valid;
+  }
 
   final Map<String, VoidCallback> _peerIdUpdateListeners = {};
 
@@ -38,26 +55,65 @@ class GroupModel {
 
   Future<void> pull({force = true, quiet = false}) async {
     if (bind.isDisableGroupPanel()) return;
-    if (!gFFI.userModel.isLogin || groupLoading.value) return;
+    if (!gFFI.userModel.isLogin) return;
     if (gFFI.userModel.networkError.isNotEmpty) return;
+    if (_pulling) {
+      _pullAgain = true;
+      _queuedPullQuiet = _queuedPullQuiet && quiet;
+      return;
+    }
     if (!force && initialized) return;
-    if (!quiet) {
-      groupLoading.value = true;
-      groupLoadError.value = "";
-    }
+    _pulling = true;
     try {
-      await _pull();
-      _tryHandlePullError();
-    } catch (e) {
-      print("pull accessibles error: $e");
-    }
-    groupLoading.value = false;
-    initialized = true;
-    platformFFI.tryHandle({'name': LoadEvent.group});
-    if (_statusCode == 401) {
-      gFFI.userModel.reset(resetOther: true);
-    } else {
-      _saveCache();
+      for (var round = 0; round < 2; round++) {
+        _pullAgain = false;
+        _queuedPullQuiet = true;
+        _pullStale = false;
+        _statusCode = 200;
+        if (!quiet) {
+          groupLoading.value = true;
+          groupLoadError.value = "";
+        }
+        try {
+          _pullContext = await bind.mainAccountRequestContext();
+          if (_pullContext![1].isNotEmpty) {
+            await _pull();
+            if (await _pullIsCurrent()) {
+              _tryHandlePullError();
+              initialized = true;
+              platformFFI.tryHandle({'name': LoadEvent.group});
+              if (_statusCode == 401) {
+                gFFI.userModel.refreshCurrentUser(reloadOtherModels: false);
+              } else {
+                _saveCache();
+              }
+            }
+          } else {
+            _pullStale = true;
+          }
+        } catch (_) {
+          await _pullIsCurrent();
+        } finally {
+          _pullContext = null;
+        }
+        if (_pullStale) {
+          initialized = false;
+          groupLoadError.value = '';
+          if (round == 0) {
+            _pullAgain = true;
+            _queuedPullQuiet = _queuedPullQuiet && quiet;
+          }
+        }
+        if (!_pullAgain || round == 1) break;
+        quiet = _queuedPullQuiet;
+      }
+    } finally {
+      _pulling = false;
+      groupLoading.value = false;
+      if (_pullAgain) {
+        final nextQuiet = _queuedPullQuiet;
+        scheduleMicrotask(() => pull(force: true, quiet: nextQuiet));
+      }
     }
   }
 
@@ -76,6 +132,7 @@ class GroupModel {
     if (!await _getPeers(tmpPeers)) {
       return;
     }
+    if (!await _pullIsCurrent()) return;
     deviceGroups.value = tmpDeviceGroups;
     // me first
     var index = tmpUsers
@@ -102,7 +159,8 @@ class GroupModel {
 
   Future<bool> _getDeviceGroups(
       List<DeviceGroupPayload> tmpDeviceGroups) async {
-    final api = "${await bind.mainGetApiServer()}/api/device-group/accessible";
+    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final api = "$apiServer/api/device-group/accessible";
     try {
       var uri0 = Uri.parse(api);
       final pageSize = 100;
@@ -119,7 +177,8 @@ class GroupModel {
               'current': current.toString(),
               'pageSize': pageSize.toString(),
             });
-        final resp = await http.get(uri, headers: getHttpHeaders());
+        final resp = await http.get(uri,
+            headers: Map<String, String>.of(accountHeaders));
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
             _jsonDecodeResp(decode_http_response(resp), resp.statusCode);
@@ -158,7 +217,8 @@ class GroupModel {
   }
 
   Future<bool> _getUsers(List<UserPayload> tmpUsers) async {
-    final api = "${await bind.mainGetApiServer()}/api/users";
+    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final api = "$apiServer/api/users";
     try {
       var uri0 = Uri.parse(api);
       final pageSize = 100;
@@ -177,7 +237,8 @@ class GroupModel {
               'accessible': '',
               'status': '1',
             });
-        final resp = await http.get(uri, headers: getHttpHeaders());
+        final resp = await http.get(uri,
+            headers: Map<String, String>.of(accountHeaders));
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
             _jsonDecodeResp(decode_http_response(resp), resp.statusCode);
@@ -223,7 +284,8 @@ class GroupModel {
 
   Future<bool> _getPeers(List<Peer> tmpPeers) async {
     try {
-      final api = "${await bind.mainGetApiServer()}/api/peers";
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/peers";
       var uri0 = Uri.parse(api);
       final pageSize = 100;
       var total = 0;
@@ -242,7 +304,8 @@ class GroupModel {
             path: uri0.path,
             port: uri0.port,
             queryParameters: queryParameters);
-        final resp = await http.get(uri, headers: getHttpHeaders());
+        final resp = await http.get(uri,
+            headers: Map<String, String>.of(accountHeaders));
         _statusCode = resp.statusCode;
 
         Map<String, dynamic> json =
@@ -312,10 +375,18 @@ class GroupModel {
     try {
       if (_cacheLoadOnceFlag || groupLoading.value || initialized) return;
       _cacheLoadOnceFlag = true;
-      final access_token = bind.mainGetLocalOption(key: 'access_token');
-      if (access_token.isEmpty) return;
+      final rawToken = bind.mainGetLocalOption(key: 'access_token');
+      if (rawToken.isEmpty) return;
+      final context = await bind.mainAccountRequestContext();
+      final access_token = context[1];
+      if (access_token != rawToken) return;
       final cache = await bind.mainLoadGroup();
       if (groupLoading.value) return;
+      final currentContext = await bind.mainAccountRequestContext();
+      if (currentContext[0] != context[0] ||
+          currentContext[1] != access_token) {
+        return;
+      }
       final data = jsonDecode(cache);
       if (data == null || data['access_token'] != access_token) return;
       deviceGroups.clear();

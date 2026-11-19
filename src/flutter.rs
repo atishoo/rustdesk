@@ -1291,7 +1291,10 @@ pub fn session_add_existed(
     } else {
         ConnType::DEFAULT_CONN
     };
-    sessions::insert_peer_session_id(peer_id, conn_type, session_id, displays);
+    let id = sessions::existing_peer_identity(&peer_id);
+    if !sessions::insert_peer_session_id(id, conn_type, session_id, displays) {
+        bail!("No session with peer id {}", peer_id);
+    }
     Ok(())
 }
 
@@ -1317,7 +1320,12 @@ pub fn session_add(
     is_shared_password: bool,
     conn_token: Option<String>,
     login_method: &str,
+    expected_rendezvous: Option<String>,
 ) -> ResultType<FlutterSession> {
+    let expected_rendezvous = expected_rendezvous
+        .as_deref()
+        .map(serde_json::from_str::<crate::client::ExpectedRendezvous>)
+        .transpose()?;
     let conn_type = if is_file_transfer {
         ConnType::FILE_TRANSFER
     } else if is_view_camera {
@@ -1369,7 +1377,9 @@ pub fn session_add(
         Some(switch_uuid.to_string())
     };
 
-    session.lc.write().unwrap().initialize(
+    let mut login = session.lc.write().unwrap();
+    login.expected_rendezvous = expected_rendezvous;
+    login.initialize(
         id.to_owned(),
         conn_type,
         switch_uuid,
@@ -1379,9 +1389,10 @@ pub fn session_add(
         conn_token,
         login_method,
     );
+    drop(login);
 
     let session = Arc::new(session.clone());
-    sessions::insert_session(session_id.to_owned(), conn_type, session.clone());
+    sessions::insert_session(session_id.to_owned(), conn_type, session.clone())?;
 
     Ok(session)
 }
@@ -2060,6 +2071,16 @@ pub mod sessions {
         static ref SESSIONS: RwLock<HashMap<(String, ConnType), FlutterSession>> = Default::default();
     }
 
+    pub(crate) fn existing_peer_identity(id: &str) -> String {
+        if let Some((peer, server)) = id.split_once('@') {
+            let peer = crate::ui_interface::handle_relay_id(peer);
+            let server = server.split_once('?').map_or(server, |(server, _)| server);
+            format!("{peer}@{server}")
+        } else {
+            crate::ui_interface::handle_relay_id(id).to_owned()
+        }
+    }
+
     #[inline]
     pub fn get_session_count(peer_id: String, conn_type: ConnType) -> usize {
         SESSIONS
@@ -2283,19 +2304,32 @@ pub mod sessions {
     }
 
     #[inline]
-    pub fn insert_session(session_id: SessionID, conn_type: ConnType, session: FlutterSession) {
-        SESSIONS
-            .write()
-            .unwrap()
-            .entry((session.get_id(), conn_type))
-            .or_insert(session)
-            .ui_handler
-            .session_handlers
-            .write()
-            .unwrap()
-            .insert(session_id, Default::default());
+    pub fn insert_session(
+        session_id: SessionID,
+        conn_type: ConnType,
+        session: FlutterSession,
+    ) -> ResultType<()> {
+        let link_session = session.lc.read().unwrap().expected_rendezvous.is_some();
+        {
+            use std::collections::hash_map::Entry;
+            let mut sessions = SESSIONS.write().unwrap();
+            let entry = sessions.entry((session.get_id(), conn_type));
+            if let Entry::Occupied(existing) = &entry {
+                if link_session || existing.get().lc.read().unwrap().expected_rendezvous.is_some() {
+                    bail!("Already exists");
+                }
+            }
+            entry
+                .or_insert(session)
+                .ui_handler
+                .session_handlers
+                .write()
+                .unwrap()
+                .insert(session_id, Default::default());
+        }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         update_session_count_to_server();
+        Ok(())
     }
 
     #[inline]
@@ -2363,51 +2397,58 @@ pub mod sessions {
 }
 
 pub(super) mod async_tasks {
-    use hbb_common::{bail, tokio, ResultType};
-    use std::{
-        collections::HashMap,
-        sync::{
-            mpsc::{sync_channel, SyncSender},
-            Arc, Mutex,
-        },
-    };
+    use hbb_common::{bail, futures::executor::block_on, log, tokio, ResultType};
+    use std::{collections::HashMap, future::Future, sync::Mutex};
 
-    type TxQueryOnlines = SyncSender<Vec<String>>;
+    type AsyncRunner = (tokio::runtime::Handle, tokio::sync::mpsc::Sender<Vec<String>>);
     lazy_static::lazy_static! {
-        static ref TX_QUERY_ONLINES: Arc<Mutex<Option<TxQueryOnlines>>> = Default::default();
+        static ref RUNNER: Mutex<Option<AsyncRunner>> = Default::default();
     }
 
     #[inline]
     pub fn start_flutter_async_runner() {
-        std::thread::spawn(start_flutter_async_runner_);
+        let mut runner = RUNNER.lock().unwrap();
+        if runner.is_some() {
+            return;
+        }
+        let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                log::warn!("Failed to initialize the Flutter async runner: {error}");
+                return;
+            }
+        };
+        let handle = runtime.handle().clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<String>>(1);
+        if let Err(error) = std::thread::Builder::new().spawn(move || {
+            runtime.block_on(async {
+                while let Some(ids) = rx.recv().await {
+                    crate::client::peer_online::query_online_states(ids, handle_query_onlines).await;
+                }
+            });
+        }) {
+            log::warn!("Failed to start the Flutter async runner: {error}");
+            return;
+        }
+        *runner = Some((handle, tx));
     }
 
     #[allow(dead_code)]
     pub fn stop_flutter_async_runner() {
-        let _ = TX_QUERY_ONLINES.lock().unwrap().take();
+        let _ = RUNNER.lock().unwrap().take();
     }
 
-    #[tokio::main(flavor = "current_thread")]
-    async fn start_flutter_async_runner_() {
-        // Only one task is allowed to run at the same time.
-        let (tx_onlines, rx_onlines) = sync_channel::<Vec<String>>(1);
-        TX_QUERY_ONLINES.lock().unwrap().replace(tx_onlines);
-
-        loop {
-            match rx_onlines.recv() {
-                Ok(ids) => {
-                    crate::client::peer_online::query_online_states(ids, handle_query_onlines).await
-                }
-                _ => {
-                    // unreachable!
-                    break;
-                }
-            }
-        }
+    pub fn resolve_link_route<F: Future + Send + 'static>(future: F) -> Option<F::Output>
+    where
+        F::Output: Send + 'static,
+    {
+        // Flutter Rust Bridge 1.x calls synchronous Rust on a worker thread.
+        let handle = RUNNER.lock().unwrap().as_ref()?.0.clone();
+        block_on(handle.spawn(future)).ok()
     }
 
     pub fn query_onlines(ids: Vec<String>) -> ResultType<()> {
-        if let Some(tx) = TX_QUERY_ONLINES.lock().unwrap().as_ref() {
+        if let Some((_, tx)) = RUNNER.lock().unwrap().as_ref() {
             // Ignore if the channel is full.
             let _ = tx.try_send(ids)?;
         } else {

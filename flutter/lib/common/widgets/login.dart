@@ -729,6 +729,7 @@ Future<bool?> _openLoginDialog() async {
   String? usernameMsg;
   String? passwordMsg;
   var isInProgress = false;
+  var dialogActive = true;
   final oidcAuth = _OidcAuthController();
   final curOP = oidcAuth.curOP;
   // Track hover state for the close icon
@@ -766,21 +767,16 @@ Future<bool?> _openLoginDialog() async {
     });
 
     onDialogCancel() {
+      dialogActive = false;
       isInProgress = false;
       close(false);
     }
 
-    handleLoginResponse(LoginResponse resp, bool storeIfAccessToken,
-        void Function([dynamic])? close) async {
+    handleLoginResponse(
+        LoginResponse resp, void Function([dynamic])? close) async {
       switch (resp.type) {
         case HttpType.kAuthResTypeToken:
           if (resp.access_token != null) {
-            if (storeIfAccessToken) {
-              await bind.mainSetLocalOption(
-                  key: 'access_token', value: resp.access_token!);
-              await bind.mainSetLocalOption(
-                  key: 'user_info', value: jsonEncode(resp.user ?? {}));
-            }
             if (close != null) {
               close(true);
             }
@@ -839,21 +835,24 @@ Future<bool?> _openLoginDialog() async {
       curOP.value = 'rustdesk';
       setState(() => isInProgress = true);
       try {
-        final resp = await gFFI.userModel.login(LoginRequest(
-            username: username.text,
-            password: password.text,
-            id: await bind.mainGetMyId(),
-            uuid: await bind.mainGetUuid(),
-            autoLogin: true,
-            type: HttpType.kAuthReqTypeAccount));
-        await handleLoginResponse(resp, true, close);
+        final resp = await gFFI.userModel.login(
+            LoginRequest(
+                username: username.text,
+                password: password.text,
+                id: await bind.mainGetMyId(),
+                uuid: await bind.mainGetUuid(),
+                autoLogin: true,
+                type: HttpType.kAuthReqTypeAccount),
+            isAttemptActive: () => dialogActive && context.mounted);
+        if (!context.mounted) return;
+        await handleLoginResponse(resp, close);
       } on RequestException catch (err) {
         passwordMsg = translate(err.cause);
       } catch (err) {
         passwordMsg = "Unknown Error: $err";
       }
       curOP.value = '';
-      setState(() => isInProgress = false);
+      if (context.mounted) setState(() => isInProgress = false);
     }
 
     thirdAuthWidget() => Obx(() {
@@ -923,7 +922,7 @@ Future<bool?> _openLoginDialog() async {
                     close(true);
 
                     if (resp != null) {
-                      handleLoginResponse(resp, false, null);
+                      handleLoginResponse(resp, null);
                     }
                   },
                 ),
@@ -991,7 +990,10 @@ Future<bool?> _openLoginDialog() async {
       onCancel: onDialogCancel,
       onSubmit: onLogin,
     );
-  }).whenComplete(oidcAuth.close);
+  }).whenComplete(() async {
+    dialogActive = false;
+    await oidcAuth.close();
+  });
 
   if (res != null) {
     await UserModel.updateOtherModels();
@@ -1004,30 +1006,38 @@ Future<bool?> verificationCodeDialog(
     UserPayload? user, String? secret, bool isEmailVerification) async {
   var autoLogin = true;
   var isInProgress = false;
+  var dialogActive = true;
   String? errorText;
 
   final code = TextEditingController();
 
   final res = await gFFI.dialogManager.show<bool>((setState, close, context) {
+    onDialogCancel() {
+      dialogActive = false;
+      close();
+    }
+
     void onVerify() async {
+      if (isInProgress) return;
       setState(() => isInProgress = true);
 
       try {
-        final resp = await gFFI.userModel.login(LoginRequest(
-            verificationCode: code.text,
-            tfaCode: isEmailVerification ? null : code.text,
-            secret: secret,
-            username: user?.name,
-            id: await bind.mainGetMyId(),
-            uuid: await bind.mainGetUuid(),
-            autoLogin: autoLogin,
-            type: HttpType.kAuthReqTypeEmailCode));
+        final resp = await gFFI.userModel.login(
+            LoginRequest(
+                verificationCode: code.text,
+                tfaCode: isEmailVerification ? null : code.text,
+                secret: secret,
+                username: user?.name,
+                id: await bind.mainGetMyId(),
+                uuid: await bind.mainGetUuid(),
+                autoLogin: autoLogin,
+                type: HttpType.kAuthReqTypeEmailCode),
+            isAttemptActive: () => dialogActive && context.mounted);
+        if (!context.mounted) return;
 
         switch (resp.type) {
           case HttpType.kAuthResTypeToken:
             if (resp.access_token != null) {
-              await bind.mainSetLocalOption(
-                  key: 'access_token', value: resp.access_token!);
               close(true);
               return;
             }
@@ -1042,7 +1052,7 @@ Future<bool?> verificationCodeDialog(
         errorText = "Unknown Error: $err";
       }
 
-      setState(() => isInProgress = false);
+      if (context.mounted) setState(() => isInProgress = false);
     }
 
     final codeField = isEmailVerification
@@ -1059,7 +1069,7 @@ Future<bool?> verificationCodeDialog(
             onChanged: () => errorText = null,
           );
 
-    getOnSubmit() => codeField.isReady ? onVerify : null;
+    getOnSubmit() => codeField.isReady && !isInProgress ? onVerify : null;
 
     return CustomAlertDialog(
         title: Text(translate("Verification code")),
@@ -1095,12 +1105,14 @@ Future<bool?> verificationCodeDialog(
             if (isInProgress) const LinearProgressIndicator(),
           ],
         ),
-        onCancel: close,
+        onCancel: onDialogCancel,
         onSubmit: getOnSubmit(),
         actions: [
-          dialogButton("Cancel", onPressed: close, isOutline: true),
+          dialogButton("Cancel", onPressed: onDialogCancel, isOutline: true),
           dialogButton("Verify", onPressed: getOnSubmit()),
         ]);
+  }).whenComplete(() {
+    dialogActive = false;
   });
   // For verification code, desktop update other models in login dialog, mobile need to close login dialog first,
   // otherwise the soft keyboard will jump out on each key press, so mobile update in verification code dialog.

@@ -830,6 +830,13 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           dx: call.arguments['dx'],
           dy: call.arguments['dy']);
       } else if (call.method == kWindowEventMoveTabToNewWindow) {
+        final request = call.arguments;
+        if (request is Map) {
+          await rustDeskWinManager.moveTabToNewWindow(request['window_id'],
+              request['id'], request['session_id'], WindowType.RemoteDesktop,
+              expectedRendezvous: request['expectedRendezvous']);
+          return null;
+        }
         final args = call.arguments.split(',');
         int? windowId;
         try {

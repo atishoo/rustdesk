@@ -593,7 +593,13 @@ impl sciter::EventHandler for SciterSession {
 }
 
 impl SciterSession {
-    pub fn new(cmd: String, id: String, password: String, args: Vec<String>) -> Self {
+    pub(crate) fn new(
+        cmd: String,
+        id: String,
+        password: String,
+        args: Vec<String>,
+        expected_rendezvous: Option<crate::client::ExpectedRendezvous>,
+    ) -> Self {
         let force_relay = args.contains(&"--relay".to_string());
         let session: Session<SciterHandler> = Session {
             password: password.clone(),
@@ -617,11 +623,10 @@ impl SciterSession {
             ConnType::DEFAULT_CONN
         };
 
-        session
-            .lc
-            .write()
-            .unwrap()
-            .initialize(id, conn_type, None, force_relay, None, None, None, "");
+        let mut login = session.lc.write().unwrap();
+        login.expected_rendezvous = expected_rendezvous;
+        login.initialize(id, conn_type, None, force_relay, None, None, None, "");
+        drop(login);
 
         Self(session)
     }

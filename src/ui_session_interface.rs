@@ -58,6 +58,278 @@ mod mobile_wheel;
 
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 
+#[cfg(any(windows, feature = "flutter", test))]
+const RECENT_CONNECTION_HEADER: &str = "RustDesk recent connection 3\n";
+#[cfg(any(windows, feature = "flutter", test))]
+const MAX_RECENT_CONNECTION_BYTES: usize = 1024;
+
+#[cfg(any(windows, feature = "flutter", test))]
+#[derive(Clone, PartialEq)]
+pub(crate) struct RecentConnection {
+    pub(crate) target: String,
+    pub(crate) key: String,
+    pub(crate) prefer_current: bool,
+    pub(crate) endpoint: String,
+}
+
+#[cfg(any(windows, feature = "flutter", test))]
+impl RecentConnection {
+    #[cfg(windows)]
+    pub(crate) fn persisted_path(&self) -> Option<std::path::PathBuf> {
+        let extension = crate::get_app_name().to_lowercase();
+        let name = recent_connection_file_name(self, &extension)?;
+        let directory = Config::path("recent-connections");
+        directory.is_absolute().then(|| directory.join(name))
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn is_persisted(&self) -> bool {
+        self.persisted_path()
+            .and_then(|path| recent_connection_target(&path))
+            .as_ref()
+            == Some(self)
+    }
+
+    fn valid(&self) -> bool {
+        valid_recent_connection_target(&self.target)
+            && (self.key.is_empty()
+                || (self.target.contains('@')
+                    && self.key.len() <= 44
+                    && crate::get_rs_pk(&self.key).is_some()))
+            && (!self.prefer_current || self.target.contains('@'))
+            && (self.endpoint.is_empty()
+                || (!self.prefer_current
+                    && self.target.contains('@')
+                    && valid_recent_connection_target(&format!("x@{}", self.endpoint))))
+    }
+
+    fn content(&self) -> String {
+        format!(
+            "{RECENT_CONNECTION_HEADER}{}\n{}\n{}\n{}",
+            self.target,
+            self.key,
+            u8::from(self.prefer_current),
+            self.endpoint,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn qualified_target(&self) -> String {
+        if self.key.is_empty() {
+            self.target.clone()
+        } else {
+            format!("{}?key={}", self.target, self.key)
+        }
+    }
+
+    #[cfg(all(windows, feature = "flutter"))]
+    pub(crate) fn window_target(&self) -> String {
+        format!(
+            "{}\n{}",
+            self.qualified_target(),
+            recent_connection_digest(&self.content())
+        )
+    }
+}
+
+#[cfg(any(windows, feature = "flutter", test))]
+fn valid_recent_connection_target(id: &str) -> bool {
+    if id.len() > MAX_RECENT_CONNECTION_BYTES
+        || id.contains(['?', '\\'])
+        || id.chars().any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return false;
+    }
+    let (peer, server) = id.split_once('@').unwrap_or((id, ""));
+    let peer = if server.is_empty() {
+        peer
+    } else {
+        peer.strip_suffix("/r").unwrap_or(peer)
+    };
+    if peer.is_empty() || matches!(peer, "." | "..") || peer.contains('/') {
+        return false;
+    }
+    if !id.contains('@') {
+        return true;
+    }
+    if server.is_empty() || server.contains(['@', '#']) {
+        return false;
+    }
+    if server.contains("://") {
+        return url::Url::parse(server).is_ok_and(|url| {
+            matches!(url.scheme(), "ws" | "wss" | "webrtc")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        });
+    }
+    !server.contains('/')
+}
+
+#[cfg(any(windows, feature = "flutter", test))]
+fn recent_connection_digest(content: &str) -> String {
+    use hbb_common::sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(content))
+}
+
+#[cfg(any(windows, feature = "flutter", test))]
+pub(crate) fn recent_connection_target(path: &std::path::Path) -> Option<RecentConnection> {
+    use std::io::Read;
+
+    let stem = path.file_stem()?.to_str()?;
+    let Some(marked_name) = stem.strip_prefix('%') else {
+        return Some(RecentConnection {
+            target: stem.to_owned(),
+            key: String::new(),
+            prefer_current: false,
+            endpoint: String::new(),
+        });
+    };
+    let (_, digest) = marked_name.rsplit_once('-')?;
+    // Public keys decode to 32 bytes and take at most 44 base64 characters.
+    let max = (RECENT_CONNECTION_HEADER.len() + 2 * MAX_RECENT_CONNECTION_BYTES + 44 + 4) as u64;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if digest.len() != 64 || !metadata.is_file() || metadata.len() > max {
+        return None;
+    }
+    let mut content = String::new();
+    let file = std::fs::File::open(path).ok()?;
+    file.take(max + 1).read_to_string(&mut content).ok()?;
+    let (target, key_and_route) = content.strip_prefix(RECENT_CONNECTION_HEADER)?.split_once('\n')?;
+    let (key, route_and_endpoint) = key_and_route.split_once('\n')?;
+    let (route, endpoint) = route_and_endpoint.split_once('\n')?;
+    let recent = RecentConnection {
+        target: target.to_owned(),
+        key: key.to_owned(),
+        prefer_current: route == "1",
+        endpoint: endpoint.to_owned(),
+    };
+    (matches!(route, "0" | "1")
+        && recent.valid()
+        && digest.eq_ignore_ascii_case(&recent_connection_digest(&content)))
+    .then_some(recent)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn recent_connection_file_name(
+    recent: &RecentConnection,
+    extension: &str,
+) -> Option<String> {
+    if !recent.valid()
+        || extension.is_empty()
+        || extension
+            .chars()
+            .any(|ch| ch.is_control() || r#"<>:"/\|?*"#.contains(ch))
+    {
+        return None;
+    }
+    let (peer, server) = recent.target.split_once('@').unwrap_or((&recent.target, ""));
+    let short_name = |value: &str, limit| {
+        value.chars().take(limit)
+            .map(|ch| if ch.is_alphanumeric() || matches!(ch, '-' | '_') { ch } else { '_' })
+            .collect::<String>()
+    };
+    let name = if server.is_empty() {
+        short_name(peer, 20)
+    } else {
+        let server = server.split_once("://").map_or(server, |(_, rest)| rest);
+        let authority = server.split('/').next().unwrap_or_default();
+        format!("{}-{}", short_name(peer.strip_suffix("/r").unwrap_or(peer), 12), short_name(authority, 12))
+    };
+    let digest = recent_connection_digest(&recent.content());
+    Some(format!("%{name}-{digest}.{extension}"))
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn store_recent_connection(
+    path: &std::path::Path,
+    recent: &RecentConnection,
+) -> std::io::Result<()> {
+    use std::{fs, io::Write};
+
+    if recent_connection_target(path).as_ref() == Some(recent) {
+        return Ok(());
+    }
+    if let Some(directory) = path.parent() {
+        fs::create_dir_all(directory)?;
+    }
+    let scratch = path.with_file_name(format!(".rustdesk-recent-{}.tmp", Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&scratch)?;
+    let written = (|| -> std::io::Result<()> {
+        file.write_all(recent.content().as_bytes())?;
+        drop(file);
+        // Publish the complete file without replacing another writer's file.
+        #[cfg(windows)]
+        return {
+            use windows::{core::HSTRING, Win32::Storage::FileSystem::MoveFileW};
+
+            unsafe { MoveFileW(&HSTRING::from(scratch.as_path()), &HSTRING::from(path)) }
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        };
+        #[cfg(not(windows))]
+        fs::hard_link(&scratch, path)
+    })();
+    let _ = fs::remove_file(scratch);
+    if written.is_err() && recent_connection_target(path).as_ref() == Some(recent) {
+        return Ok(());
+    }
+    written
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recent_connection_file_name, recent_connection_target, RecentConnection};
+
+    fn recent(target: &str) -> RecentConnection {
+        RecentConnection {
+            target: target.to_owned(),
+            key: String::new(),
+            prefer_current: false,
+            endpoint: String::new(),
+        }
+    }
+
+    #[test]
+    fn legacy_recent_connection_uses_the_plain_file_name() {
+        let path = std::path::Path::new("old shortcuts/OfficeMünchen.rustdesk");
+        assert_eq!(
+            recent_connection_target(path).map(|recent| recent.target),
+            Some("OfficeMünchen".to_owned())
+        );
+    }
+
+    #[test]
+    fn recent_connection_names_are_short_and_case_distinct() {
+        assert!(recent_connection_file_name(&recent("aux.example.com:21118"), "rustdesk").is_some());
+        let id = format!(
+            "OfficePC@{}.{}.{}.example:21116",
+            "A".repeat(62), "B".repeat(62), "C".repeat(62)
+        );
+        let name = recent_connection_file_name(&recent(&id), "rustdesk").unwrap();
+        assert!(id.len() > 210 && name.encode_utf16().count() < 100);
+        assert!(name.starts_with("%OfficePC-"));
+        assert_ne!(
+            name.to_ascii_lowercase(),
+            recent_connection_file_name(&recent(&id.to_ascii_lowercase()), "rustdesk")
+                .unwrap()
+                .to_ascii_lowercase()
+        );
+    }
+
+    #[test]
+    fn recent_connection_targets_reject_credentials_and_paths() {
+        for id in [
+            ".",
+            "..",
+            "folder/device",
+            "OfficePC@server.example?key=value",
+            "OfficePC@wss://user:password@server.example",
+        ] {
+            assert_eq!(recent_connection_file_name(&recent(id), "rustdesk"), None);
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Session<T: InvokeUiSession> {
     pub password: String,
@@ -1683,7 +1955,8 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn get_conn_token(&self) -> Option<String> {
-        self.lc.read().unwrap().get_conn_token()
+        let round = self.connection_round_state.lock().unwrap();
+        self.lc.read().unwrap().get_conn_token(round.is_connected())
     }
 
     pub fn printer_response(&self, id: i32, path: String, printer_name: String) {
@@ -1813,7 +2086,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         self.ui_handler.set_multiple_windows_session(sessions);
     }
 
-    fn handle_peer_info(&self, mut pi: PeerInfo) {
+    fn handle_peer_info(&self, mut pi: PeerInfo, trust: &crate::trusted_devices::client::Session) {
         log::debug!("handle_peer_info :{:?}", pi);
         self.lc.write().unwrap().peer_info = Some(pi.clone());
         if pi.current_display as usize >= pi.displays.len() {
@@ -1829,7 +2102,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             }
         } else if !self.is_port_forward() && !self.is_terminal() {
             if pi.displays.is_empty() {
-                self.lc.write().unwrap().handle_peer_info(&pi);
+                self.lc.write().unwrap().handle_peer_info(&pi, trust);
                 self.update_privacy_mode();
                 let msg = if self.is_view_camera() {
                     "No cameras"
@@ -1841,10 +2114,6 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             }
             if !self.is_view_camera() {
                 self.try_change_init_resolution(pi.current_display);
-                let p = self.lc.read().unwrap().should_auto_login();
-                if !p.is_empty() {
-                    crate::client::auto_login(p, &pi, self.clone());
-                }
             }
             let current = &pi.displays[pi.current_display as usize];
             self.set_display(
@@ -1861,7 +2130,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         *self.audit_guid.lock().unwrap() = String::new();
         *self.last_audit_note.lock().unwrap() = String::new();
         // Save recent peers, then push event to flutter. So flutter can refresh peer page.
-        self.lc.write().unwrap().handle_peer_info(&pi);
+        self.lc.write().unwrap().handle_peer_info(&pi, trust);
         self.set_peer_info(&pi);
         if self.is_file_transfer() {
             self.close_success();
@@ -1876,12 +2145,19 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         self.on_connected(self.lc.read().unwrap().conn_type);
         #[cfg(windows)]
         {
-            let mut path = std::env::temp_dir();
-            path.push(self.get_id());
-            let path = path.with_extension(crate::get_app_name().to_lowercase());
-            std::fs::File::create(&path).ok();
-            if let Some(path) = path.to_str() {
-                crate::platform::windows::add_recent_document(&path);
+            let recent = self.lc.read().unwrap().recent_connection.clone();
+            if let Some(recent) = recent {
+                if let Some(path) = recent.persisted_path().as_deref().and_then(|path| {
+                    path.to_str().filter(|_| store_recent_connection(path, &recent).is_ok())
+                }) {
+                    crate::platform::windows::add_recent_document(path);
+                } else {
+                    hbb_common::throttled_log!(
+                        std::time::Duration::from_secs(60),
+                        warn,
+                        "Failed to create a recent connection shortcut"
+                    );
+                }
             }
         }
         if !pi.windows_sessions.sessions.is_empty() {

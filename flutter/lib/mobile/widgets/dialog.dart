@@ -94,18 +94,22 @@ void showServerSettingsWithValue(
       setState(() {
         isInProgress = true;
       });
-      bool ret = await setServerConfig(
-          null,
-          errMsgs,
-          ServerConfig(
-              idServer: idCtrl.text.trim(),
-              relayServer: relayCtrl.text.trim(),
-              apiServer: apiCtrl.text.trim(),
-              key: keyCtrl.text.trim()));
-      setState(() {
-        isInProgress = false;
-      });
-      return ret;
+      try {
+        return await setServerConfig(
+            null,
+            errMsgs,
+            ServerConfig(
+                idServer: idCtrl.text.trim(),
+                relayServer: relayCtrl.text.trim(),
+                apiServer: apiCtrl.text.trim(),
+                key: keyCtrl.text.trim()));
+      } finally {
+        if (context.mounted) {
+          setState(() {
+            isInProgress = false;
+          });
+        }
+      }
     }
 
     Widget buildField(

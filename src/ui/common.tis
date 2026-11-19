@@ -412,22 +412,79 @@ class PasswordComponent: Reactor.Component {
 }
 
 // type: #post, #get, #delete, #put
-function httpRequest(url, type, params, _onSuccess, _onError, headers="") {
-    if (type != #post) {
-        stderr.println("only post ok");
+var httpRequestQueue = [];
+var httpRequestActive = false;
+
+function httpRequest(url, type, params, _onSuccess, _onError, headers="", allowStale=false, isValid=null) {
+    httpRequestQueue.push({url: url, type: type, params: params, onSuccess: _onSuccess, onError: _onError, headers: headers, allowStale: allowStale, isValid: isValid});
+    runNextHttpRequest();
+}
+
+function runNextHttpRequest() {
+    if (httpRequestActive || !httpRequestQueue.length) return;
+    httpRequestActive = true;
+    var request = httpRequestQueue.splice(0, 1)[0];
+    if (request.isValid && !request.isValid()) {
+        try { request.onError("Account session changed", 0); } catch (ignored) {}
+        httpRequestActive = false;
+        runNextHttpRequest();
+        return;
     }
-    handler.post_request(url, JSON.stringify(params), headers);
-    function check_status() {
-        var status = handler.get_async_job_status();
-        if (status == " ") self.timer(0.1s, check_status);
-        else {
-            try {
-                var data = JSON.parse(status || "{}");
-                _onSuccess(data);
-            } catch (e) {
-                _onError(status, 0);
-            }
+    if (request.type != #post) {
+        request.onError("Unsupported HTTP method", 0);
+        httpRequestActive = false;
+        runNextHttpRequest();
+        return;
+    }
+    var bearerPrefix = "Authorization: Bearer ";
+    if (!request.allowStale && request.headers.indexOf(bearerPrefix) == 0) {
+        var context;
+        try { context = JSON.parse(handler.account_request_context()); } catch (e) {}
+        if (!context || !context[1] ||
+            request.headers.substring(bearerPrefix.length) != context[1] ||
+            request.url.indexOf(context[0] + "/api/") != 0) {
+            try { request.onError("Account session changed", 0); } catch (ignored) {}
+            httpRequestActive = false;
+            runNextHttpRequest();
+            return;
         }
+    }
+    var requestHeaders = {"Content-Type": "application/json"};
+    var separator = request.headers.indexOf(": ");
+    if (separator > 0) {
+        requestHeaders[request.headers.substring(0, separator)] = request.headers.substring(separator + 2);
+    }
+    try {
+        handler.http_request(request.url, "post", JSON.stringify(request.params), JSON.stringify(requestHeaders));
+    } catch (e) {
+        try { request.onError(e.toString(), 0); } catch (ignored) {}
+        httpRequestActive = false;
+        runNextHttpRequest();
+        return;
+    }
+    function check_status() {
+        var status = handler.get_http_status(request.url);
+        if (status == " ") { self.timer(0.1s, check_status); return; }
+        var response;
+        try { response = JSON.parse(status); } catch (e) {}
+        var code = response && response.status_code;
+        var data;
+        var parsedBody = false;
+        if (response) {
+            try { data = JSON.parse(response.body || "{}"); parsedBody = true; } catch (e) {}
+        }
+        try {
+            if (!code) request.onError(status, 0);
+            else if (code >= 200 && code < 300 && parsedBody) request.onSuccess(data);
+            else {
+                var error = data && data.error ? data.error : (response.body || "HTTP " + code);
+                request.onError(error, code);
+            }
+        } catch (e) {
+            try { request.onError(e.toString(), 0); } catch (ignored) {}
+        }
+        httpRequestActive = false;
+        runNextHttpRequest();
     }
     check_status();
 }

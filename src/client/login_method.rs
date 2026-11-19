@@ -34,6 +34,7 @@ mod tests {
     use base::message_proto::{Hash, Message, PeerInfo};
     use hbb_common::{
         config::PeerConfig, protobuf::Message as _, rendezvous_proto::ConnType, tcp::FramedStream,
+        sha2::{Digest, Sha256},
         tokio, Stream,
     };
 
@@ -76,6 +77,7 @@ mod tests {
                 false,
                 None,
                 method.to_owned(),
+                None,
             );
             let monitor_session_id = uuid::Uuid::new_v4();
             let monitor_result = crate::flutter_ffi::session_add_existed_sync(
@@ -130,11 +132,11 @@ mod tests {
                     lc.config.password = vec![1; 32];
                     lc.password = vec![2; 32];
                     lc.shared_password = Some("shared password".into());
-                    let token = lc.get_conn_token();
+                    let token = lc.get_conn_token(false);
                     if skip {
                         assert!(lc.set_login_method("request-approval"));
                     }
-                    assert_eq!(lc.get_conn_token(), token);
+                    assert_eq!(lc.get_conn_token(false), token);
                     let request = lc.create_login_msg(String::new(), String::new(), vec![4; 32]);
                     assert_eq!(request.login_request().password.is_empty(), skip);
                 }
@@ -212,7 +214,9 @@ mod tests {
             if request_approval {
                 assert!(lc.set_login_method("request-approval"));
             }
-            lc.handle_peer_info(&PeerInfo::default());
+            let mut trust = crate::trusted_devices::client::Session::default();
+            trust.password_attempt = Some(Sha256::digest(&lc.password).into());
+            lc.handle_peer_info(&PeerInfo::default(), &trust);
             let saved = PeerConfig::load(&lc.id).password;
             PeerConfig::remove(&lc.id);
             assert_eq!(
@@ -266,7 +270,7 @@ mod tests {
             .lc
             .write()
             .unwrap()
-            .handle_peer_info(&PeerInfo::default());
+            .handle_peer_info(&PeerInfo::default(), &Default::default());
         let saved = PeerConfig::load(&id).password;
         PeerConfig::remove(&id);
         assert_eq!(saved, config.password);

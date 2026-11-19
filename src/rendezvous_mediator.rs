@@ -1394,7 +1394,8 @@ impl RendezvousMediator {
             relay_server = provided_by_rendezvous_server;
         }
         if relay_server.is_empty() {
-            relay_server = crate::increase_port(&self.host, 1);
+            relay_server = crate::client::websocket_gateway_relay(&self.host)
+                .unwrap_or_else(|| crate::increase_port(&self.host, 1));
         }
         relay_server
     }

@@ -175,10 +175,11 @@ async fn connect_and_login(
     } else {
         ConnType::PORT_FORWARD
     };
-    let ((mut stream, direct, pk, kcp, _stream_type), (feedback, rendezvous_server)) =
+    let ((mut stream, direct, pk, kcp, _stream_type), rendezvous) =
         Client::start(id, key, token, conn_type, interface.clone()).await?;
     let mut trust = crate::trusted_devices::client::Session::new(
         &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
+    trust.password_scope = rendezvous.password_scope();
     interface.update_direct(Some(direct));
     if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
         if !confirm_insecure_connection(&interface, ui_receiver).await {
@@ -191,7 +192,7 @@ async fn connect_and_login(
     let mut challenge = None;
     let mut pending_login = None;
 
-    let _keep_it = hc_connection(feedback, rendezvous_server, token).await;
+    let _keep_it = hc_connection(rendezvous).await;
 
     loop {
         tokio::select! {
@@ -219,7 +220,7 @@ async fn connect_and_login(
                                 }
                             }
                             Some(login_response::Union::PeerInfo(pi)) => {
-                                interface.handle_peer_info(pi);
+                                interface.handle_peer_info(pi, &trust);
                                 break;
                             }
                             _ => {}
@@ -428,10 +429,11 @@ async fn connect_and_login_mux(
     } else {
         ConnType::PORT_FORWARD
     };
-    let ((mut stream, direct, pk, kcp, _stream_type), (feedback, rendezvous_server)) =
+    let ((mut stream, direct, pk, kcp, _stream_type), rendezvous) =
         Client::start(id, key, token, conn_type, interface.clone()).await?;
     let mut trust = crate::trusted_devices::client::Session::new(
         &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
+    trust.password_scope = rendezvous.password_scope();
     interface.update_direct(Some(direct));
     if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
         if !confirm_insecure_connection(&interface, ui_receiver).await {
@@ -446,7 +448,7 @@ async fn connect_and_login_mux(
     let mut challenge = None;
     let mut pending_login = None;
 
-    let _keep_it = hc_connection(feedback, rendezvous_server, token).await;
+    let _keep_it = hc_connection(rendezvous).await;
 
     loop {
         tokio::select! {
@@ -475,7 +477,7 @@ async fn connect_and_login_mux(
                             }
                             Some(login_response::Union::PeerInfo(pi)) => {
                                 mux = peer_supports_mux(&pi);
-                                interface.handle_peer_info(pi);
+                                interface.handle_peer_info(pi, &trust);
                                 break;
                             }
                             _ => {}
@@ -655,7 +657,7 @@ mod login_tests {
         fn handle_login_error(&self, _err: &str) -> bool {
             false
         }
-        fn handle_peer_info(&self, _pi: PeerInfo) {}
+        fn handle_peer_info(&self, _pi: PeerInfo, _trust: &crate::trusted_devices::client::Session) {}
         fn set_multiple_windows_session(&self, _sessions: Vec<WindowsSession>) {}
         async fn handle_hash(&self, pass: &str, hash: Hash, trust: &mut crate::trusted_devices::client::Session, peer: &mut Stream) -> bool {
             sleep(self.pause).await;

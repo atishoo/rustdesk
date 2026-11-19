@@ -90,14 +90,65 @@ pub fn start(args: &mut [String]) {
     #[cfg(windows)]
     crate::platform::try_set_window_foreground(frame.get_hwnd() as _);
     let page;
+    #[cfg(windows)]
+    let mut expected_rendezvous = None;
+    #[cfg(not(windows))]
+    let expected_rendezvous = None;
     if args.len() > 1 && args[0] == "--play" {
         args[0] = "--connect".to_owned();
         let path: std::path::PathBuf = (&args[1]).into();
+        #[cfg(not(windows))]
         let id = path
             .file_stem()
             .map(|p| p.to_str().unwrap_or(""))
             .unwrap_or("")
             .to_owned();
+        #[cfg(windows)]
+        let id = match crate::ui_session_interface::recent_connection_target(&path) {
+            Some(recent) => {
+                if (recent.prefer_current || !recent.endpoint.is_empty()) && !recent.is_persisted() {
+                    log::warn!("Failed to verify the saved recent connection address");
+                    return;
+                }
+                if let (true, Some((peer, server))) =
+                    (recent.prefer_current, recent.target.split_once('@'))
+                {
+                    let current = CONNECTION_LINK_RUNTIME.as_ref().and_then(|runtime| {
+                        runtime.block_on(crate::client::current_expected_rendezvous(
+                            peer,
+                            server,
+                            &recent.key,
+                            true,
+                        ))
+                    });
+                    let id = if current.is_some() {
+                        peer.to_owned()
+                    } else {
+                        recent.qualified_target()
+                    };
+                    expected_rendezvous = Some(crate::client::ExpectedRendezvous {
+                        server: current.unwrap_or_else(|| server.to_owned()),
+                        key: recent.key,
+                        fixed_endpoint: true,
+                    });
+                    id
+                } else {
+                    let target = recent.qualified_target();
+                    if !recent.endpoint.is_empty() {
+                        expected_rendezvous = Some(crate::client::ExpectedRendezvous {
+                            server: recent.endpoint,
+                            key: recent.key,
+                            fixed_endpoint: true,
+                        });
+                    }
+                    target
+                }
+            }
+            None => {
+                log::warn!("Failed to open an invalid recent connection");
+                return;
+            }
+        };
         args[1] = id;
     }
     if args.is_empty() {
@@ -149,8 +200,13 @@ pub fn start(args: &mut [String]) {
         let args: Vec<String> = iter.map(|x| x.clone()).collect();
         frame.set_title(&id);
         frame.register_behavior("native-remote", move || {
-            let handler =
-                remote::SciterSession::new(cmd.clone(), id.clone(), pass.clone(), args.clone());
+            let handler = remote::SciterSession::new(
+                cmd.clone(),
+                id.clone(),
+                pass.clone(),
+                args.clone(),
+                expected_rendezvous.clone(),
+            );
             #[cfg(not(feature = "flutter"))]
             {
                 *CUR_SESSION.lock().unwrap() = Some(handler.inner());
@@ -611,8 +667,8 @@ impl UI {
         change_id_shared(id, old_id);
     }
 
-    fn http_request(&self, url: String, method: String, body: Option<String>, header: String) {
-        http_request(url, method, body, header)
+    fn http_request(&self, url: String, method: String, body: String, header: String) {
+        http_request(url, method, Some(body), header)
     }
 
     fn post_request(&self, url: String, body: String, header: String) {
@@ -627,8 +683,8 @@ impl UI {
         get_async_job_status()
     }
 
-    fn get_http_status(&self, url: String) -> Option<String> {
-        get_async_http_status(url)
+    fn get_http_status(&self, url: String) -> String {
+        get_async_http_status(url).unwrap_or_default()
     }
 
     fn t(&self, name: String) -> String {
@@ -640,9 +696,20 @@ impl UI {
     }
 
     fn get_api_server(&self) -> String {
-        get_api_server()
+        crate::hbbs_http::account_api_server()
     }
 
+    fn account_login_context(&self) -> String {
+        serde_json::to_string(&crate::hbbs_http::account_login_context()).unwrap_or_default()
+    }
+
+    fn account_request_context(&self) -> String {
+        serde_json::to_string(&crate::hbbs_http::account_request_context()).unwrap_or_default()
+    }
+
+    fn store_account_token(&self, token: String, deployment: String) {
+        crate::hbbs_http::store_account_token(token, &deployment);
+    }
     fn has_hwcodec(&self) -> bool {
         has_hwcodec()
     }
@@ -723,6 +790,9 @@ impl sciter::EventHandler for UI {
     sciter::dispatch_script_call! {
         fn t(String);
         fn get_api_server();
+        fn account_login_context();
+        fn account_request_context();
+        fn store_account_token(String, String);
         fn is_xfce();
         fn using_public_server();
         fn is_custom_client();
@@ -801,6 +871,8 @@ impl sciter::EventHandler for UI {
         fn change_id(String);
         fn get_async_job_status();
         fn post_request(String, String, String);
+        fn http_request(String, String, String, String);
+        fn get_http_status(String);
         fn is_ok_change_id();
         fn create_shortcut(String);
         fn discover();

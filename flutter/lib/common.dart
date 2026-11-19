@@ -2196,7 +2196,6 @@ Future<bool> initUniLinks() async {
   // check cold boot
   try {
     final initialLink = await getInitialLink();
-    print("initialLink: $initialLink");
     if (initialLink == null || initialLink.isEmpty) {
       return false;
     }
@@ -2204,10 +2203,9 @@ Future<bool> initUniLinks() async {
       webInitialLink = initialLink;
       return false;
     } else {
-      return handleUriLink(uriString: initialLink);
+      return await handleUriLink(uriString: initialLink);
     }
-  } catch (err) {
-    debugPrintStack(label: "$err");
+  } catch (_) {
     return false;
   }
 }
@@ -2222,19 +2220,18 @@ StreamSubscription? listenUniLinks({handleByFlutter = true}) {
     return null;
   }
 
-  final sub = uriLinkStream.listen((Uri? uri) {
-    debugPrint("A uri was received: $uri. handleByFlutter $handleByFlutter");
-    if (uri != null) {
+  final sub = linkStream.listen((String? link) {
+    if (link != null) {
       if (handleByFlutter) {
-        handleUriLink(uri: uri);
+        handleUriLink(uriString: link);
       } else {
-        bind.sendUrlScheme(url: uri.toString());
+        bind.sendUrlScheme(url: link);
       }
     } else {
       print("uni listen error: uri is empty.");
     }
-  }, onError: (err) {
-    print("uni links error: $err");
+  }, onError: (_) {
+    debugPrint('Failed to receive a connection link.');
   });
   return sub;
 }
@@ -2252,24 +2249,41 @@ setEnvTerminalAdmin() {
   bind.mainSetEnv(key: 'IS_TERMINAL_ADMIN', value: 'Y');
 }
 
+const _encodedConnectPath = '/peer/';
+
+Uri? _parseConnectionUri(String link) {
+  final uri = Uri.tryParse(link);
+  if (!isWeb && uri?.authority == 'connect-id') {
+    final path = link.split(RegExp(r'[?#]')).first;
+    if (path.split('/').any((segment) {
+      final decoded = segment.toLowerCase().replaceAll('%2e', '.');
+      return decoded == '.' || decoded == '..';
+    })) {
+      return null;
+    }
+  }
+  return uri;
+}
+
+bool isRustDeskUri(String uri) =>
+    uri.startsWith(bind.mainUriPrefixSync()) ||
+    (!isWeb && uri.startsWith('rustdesk://connect-id$_encodedConnectPath'));
+
 // uri link handler
-bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
+Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
   List<String>? args;
   if (cmdArgs != null && cmdArgs.isNotEmpty) {
     args = cmdArgs;
     // rustdesk <uri link>
-    if (args[0].startsWith(bind.mainUriPrefixSync())) {
-      final uri = Uri.tryParse(args[0]);
-      if (uri != null) {
-        args = urlLinkToCmdArgs(uri);
-      }
+    if (isRustDeskUri(args[0])) {
+      final uri = _parseConnectionUri(args[0]);
+      if (uri == null) return false;
+      args = await urlLinkToCmdArgs(uri);
     }
-  } else if (uri != null) {
-    args = urlLinkToCmdArgs(uri);
   } else if (uriString != null) {
-    final uri = Uri.tryParse(uriString);
+    final uri = _parseConnectionUri(uriString);
     if (uri != null) {
-      args = urlLinkToCmdArgs(uri);
+      args = await urlLinkToCmdArgs(uri);
     }
   }
   if (args == null) {
@@ -2286,6 +2300,8 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
   String? password;
   String? switchUuid;
   bool? forceRelay;
+  String? recentConnection;
+  String? expectedRendezvous;
   var loginMethod = '';
   for (int i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -2333,6 +2349,16 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
       case '--request-approval':
         loginMethod = 'request-approval';
         break;
+      case '--recent-connection':
+        if (!identical(args, cmdArgs) && i + 1 < args.length) {
+          recentConnection = args[++i];
+        }
+        break;
+      case '--expected-rendezvous':
+        if (!identical(args, cmdArgs) && i + 1 < args.length) {
+          expectedRendezvous = args[++i];
+        }
+        break;
       case '--switch_uuid':
         switchUuid = args[i + 1];
         i++;
@@ -2355,42 +2381,49 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
               loginMethod: loginMethod,
               password: password,
               switchUuid: switchUuid,
-              forceRelay: forceRelay);
+              forceRelay: forceRelay,
+              recentConnection: recentConnection,
+              expectedRendezvous: expectedRendezvous);
         });
         break;
       case UriLinkType.fileTransfer:
         Future.delayed(Duration.zero, () {
           rustDeskWinManager.newFileTransfer(id!,
               loginMethod: loginMethod,
-              password: password, forceRelay: forceRelay);
+              password: password,
+              forceRelay: forceRelay);
         });
         break;
       case UriLinkType.viewCamera:
         Future.delayed(Duration.zero, () {
           rustDeskWinManager.newViewCamera(id!,
               loginMethod: loginMethod,
-              password: password, forceRelay: forceRelay);
+              password: password,
+              forceRelay: forceRelay);
         });
         break;
       case UriLinkType.portForward:
         Future.delayed(Duration.zero, () {
           rustDeskWinManager.newPortForward(id!, false,
               loginMethod: loginMethod,
-              password: password, forceRelay: forceRelay);
+              password: password,
+              forceRelay: forceRelay);
         });
         break;
       case UriLinkType.rdp:
         Future.delayed(Duration.zero, () {
           rustDeskWinManager.newPortForward(id!, true,
               loginMethod: loginMethod,
-              password: password, forceRelay: forceRelay);
+              password: password,
+              forceRelay: forceRelay);
         });
         break;
       case UriLinkType.terminal:
         Future.delayed(Duration.zero, () {
           rustDeskWinManager.newTerminal(id!,
               loginMethod: loginMethod,
-              password: password, forceRelay: forceRelay);
+              password: password,
+              forceRelay: forceRelay);
         });
         break;
     }
@@ -2401,9 +2434,12 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
   return false;
 }
 
-List<String>? urlLinkToCmdArgs(Uri uri) {
+Future<List<String>?> urlLinkToCmdArgs(Uri uri) async {
   String? command;
   String? id;
+  final encodedConnect = !isWeb &&
+      uri.authority == 'connect-id' &&
+      uri.path.startsWith(_encodedConnectPath);
   final options = [
     "connect",
     "play",
@@ -2466,10 +2502,30 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
         });
       }
     }
-  } else if (options.contains(uri.authority)) {
-    command = '--${uri.authority}';
+  } else if (encodedConnect || options.contains(uri.authority)) {
+    command = encodedConnect ? '--connect' : '--${uri.authority}';
     if (uri.path.length > 1) {
-      id = uri.path.substring(1);
+      id = uri.path.substring(encodedConnect ? _encodedConnectPath.length : 1);
+      if (encodedConnect) {
+        if (id.toUpperCase().startsWith('%EF%BB%BF')) {
+          return null;
+        }
+        try {
+          id = Uri.decodeComponent(id);
+        } on FormatException {
+          return null;
+        }
+        final target = id.split('@');
+        final deviceId = target.first.replaceFirst(RegExp(r'[/\\]r$'), '');
+        if (deviceId.isEmpty ||
+            RegExp(r'[/\\?]').hasMatch(deviceId) ||
+            target.length > 2 ||
+            (target.length == 2 &&
+                (target[1].isEmpty || target[1].contains('?'))) ||
+            RegExp(r'[\s\x00-\x1f\x7f-\x9f]').hasMatch(id)) {
+          return null;
+        }
+      }
     }
   } else if (uri.authority.length > 2 &&
       (uri.path.length <= 1 ||
@@ -2484,6 +2540,21 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     }
   }
 
+  if (encodedConnect) {
+    try {
+      final outerKeys = uri.queryParametersAll.entries
+          .where((entry) => entry.key.toLowerCase() == 'key')
+          .expand((entry) => entry.value)
+          .toList();
+      if (outerKeys.length > 1 ||
+          outerKeys.any(
+              (key) => RegExp(r'[&?@\s\x00-\x1f\x7f-\x9f]').hasMatch(key))) {
+        return null;
+      }
+    } on FormatException {
+      return null;
+    }
+  }
   var queryParameters =
       uri.queryParameters.map((k, v) => MapEntry(k.toLowerCase(), v));
   final requestApproval = queryParameters['request-approval'] == 'true';
@@ -2491,10 +2562,64 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     queryParameters.remove('password');
   }
 
-  var key = queryParameters["key"];
+  final key = queryParameters["key"];
+  String? recentTarget;
+  String? expectedRendezvous;
   if (id != null) {
-    if (key != null) {
-      id = "$id?key=$key";
+    if (encodedConnect) {
+      final at = id.indexOf('@');
+      String? expectedServer = at > 0 ? id.substring(at + 1) : null;
+      var expectedKey = key ?? '';
+      var fixedEndpoint = false;
+      if (at < 0 && key?.isNotEmpty == true) return null;
+      final preferCurrent = queryParameters['prefer_current'] == '1';
+      final preferTransport =
+          at > 0 && queryParameters['prefer_current'] == 'transport';
+      final endpoint = queryParameters['endpoint'];
+      final recentEndpoint = isWindows &&
+              at > 0 &&
+              !preferTransport &&
+              queryParameters['recent'] == 'true' &&
+              (preferCurrent || endpoint?.isNotEmpty == true)
+          ? endpoint ?? ''
+          : null;
+      if (at < 0 ||
+          preferCurrent ||
+          preferTransport ||
+          recentEndpoint != null) {
+        final resolved = await bind.mainResolveUriTarget(
+            target: id,
+            key: key ?? '',
+            preferCurrent: preferCurrent || preferTransport,
+            recentEndpoint: recentEndpoint);
+        if (resolved.isEmpty) return null;
+        if (!preferTransport) id = resolved[0];
+        if (resolved.length > 1) {
+          expectedServer = resolved[1];
+          fixedEndpoint = id.contains('@') || resolved.length > 3;
+        }
+        if (resolved.length > 2) {
+          expectedKey = resolved[2];
+        }
+        if (resolved.length > 3 &&
+            queryParameters.keys.every((key) =>
+                key == 'recent' ||
+                key == 'key' ||
+                key == 'prefer_current' ||
+                key == 'endpoint')) {
+          recentTarget = resolved[3];
+        }
+      }
+      expectedRendezvous = jsonEncode({
+        'server': expectedServer ?? '',
+        'key': expectedKey,
+        if (fixedEndpoint) 'fixed_endpoint': true,
+      });
+      if (id?.contains('@') == true && key?.isNotEmpty == true) {
+        id = '$id?key=$key';
+      }
+    } else if (key != null) {
+      id = '$id?key=$key';
     }
   }
 
@@ -2507,24 +2632,36 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     if (command == '--file-transfer') {
       connect(Get.context!, id,
           loginMethod: loginMethod,
-          isFileTransfer: true, forceRelay: forceRelay, password: password);
+          isFileTransfer: true,
+          forceRelay: forceRelay,
+          password: password);
     } else if (command == '--view-camera') {
       connect(Get.context!, id,
           loginMethod: loginMethod,
-          isViewCamera: true, forceRelay: forceRelay, password: password);
+          isViewCamera: true,
+          forceRelay: forceRelay,
+          password: password);
     } else if (command == '--terminal') {
       connect(Get.context!, id,
           loginMethod: loginMethod,
-          isTerminal: true, forceRelay: forceRelay, password: password);
+          isTerminal: true,
+          forceRelay: forceRelay,
+          password: password);
     } else if (command == '--terminal-admin') {
       setEnvTerminalAdmin();
       connect(Get.context!, id,
           loginMethod: loginMethod,
-          isTerminal: true, forceRelay: forceRelay, password: password);
+          isTerminal: true,
+          forceRelay: forceRelay,
+          password: password);
     } else {
       // Default to remote desktop for '--connect', '--play', or direct connection
       connect(Get.context!, id,
-          loginMethod: loginMethod, forceRelay: forceRelay, password: password);
+          loginMethod: loginMethod,
+          forceRelay: forceRelay,
+          password: password,
+          expectedRendezvous: expectedRendezvous,
+          preserveServerAddress: encodedConnect && id.contains('@'));
     }
     return null;
   }
@@ -2537,6 +2674,12 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     String? password = param["password"];
     if (password != null) args.addAll(['--password', password]);
     if (requestApproval) args.add('--request-approval');
+    if (recentTarget != null) {
+      args.addAll(['--recent-connection', recentTarget]);
+    }
+    if (expectedRendezvous != null) {
+      args.addAll(['--expected-rendezvous', expectedRendezvous]);
+    }
     String? switch_uuid = param["switch_uuid"];
     if (switch_uuid != null) args.addAll(['--switch_uuid', switch_uuid]);
     if (param["relay"] != null) args.add("--relay");
@@ -2544,6 +2687,19 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
   }
 
   return null;
+}
+
+String? connectionTokenTarget(String? token) {
+  if (token == null) return null;
+  try {
+    final decoded = jsonDecode(token);
+    final target = decoded is Map ? decoded['scoped_target'] : null;
+    return target is List && target.length == 2 && target.first is String
+        ? target.first as String
+        : null;
+  } on FormatException {
+    return null;
+  }
 }
 
 connectMainDesktop(String id,
@@ -2609,7 +2765,14 @@ connect(BuildContext context, String id,
     String? password,
     String? connToken,
     bool? isSharedPassword,
+    bool preserveServerAddress = false,
+    String? expectedRendezvous,
     String loginMethod = ''}) async {
+  final scopedTarget = connectionTokenTarget(connToken);
+  if (scopedTarget != null) {
+    id = scopedTarget;
+    preserveServerAddress = true;
+  }
   if (id == '') return;
   if (!isDesktop || desktopType == DesktopType.main) {
     try {
@@ -2624,9 +2787,11 @@ connect(BuildContext context, String id,
     } catch (_) {}
   }
   id = id.replaceAll(' ', '');
-  final oldId = id;
-  id = await bind.mainHandleRelayId(id: id);
-  forceRelay = id != oldId || forceRelay;
+  if (!preserveServerAddress) {
+    final oldId = id;
+    id = await bind.mainHandleRelayId(id: id);
+    forceRelay = id != oldId || forceRelay;
+  }
   assert(!(isFileTransfer && isTcpTunneling && isRDP),
       "more than one connect type");
 
@@ -2641,6 +2806,7 @@ connect(BuildContext context, String id,
         isTcpTunneling: isTcpTunneling,
         isRDP: isRDP,
         password: password,
+        connToken: scopedTarget == null ? null : connToken,
         isSharedPassword: isSharedPassword,
         forceRelay: forceRelay,
       );
@@ -2660,6 +2826,12 @@ connect(BuildContext context, String id,
       });
     }
   } else {
+    if (isMobile &&
+        expectedRendezvous != null &&
+        (!stateGlobal.isInMainPage || gFFI.id.isNotEmpty)) {
+      showToast(translate('Already exists'));
+      return;
+    }
     if (isFileTransfer) {
       if (isWeb) {
         Navigator.push(
@@ -2752,6 +2924,7 @@ connect(BuildContext context, String id,
                 loginMethod: loginMethod,
                 password: password,
                 isSharedPassword: isSharedPassword,
+                expectedRendezvous: expectedRendezvous,
                 forceRelay: forceRelay),
           ),
         );
@@ -2770,6 +2943,11 @@ Map<String, String> getHttpHeaders() {
   return {
     'Authorization': 'Bearer ${bind.mainGetLocalOption(key: 'access_token')}'
   };
+}
+
+Future<(String, Map<String, String>)> getAccountHttpContext() async {
+  final [api, token] = await bind.mainAccountRequestContext();
+  return (api, {'Authorization': 'Bearer $token'});
 }
 
 // Simple wrapper of built-in types for reference use.
@@ -3622,7 +3800,7 @@ Future<bool> setServerConfig(
   List<TextEditingController>? controllers,
   List<RxString>? errMsgs,
   ServerConfig config,
-) async {
+) => gFFI.userModel.saveServerConfig(() async {
   String removeEndSlash(String input) {
     if (input.endsWith('/')) {
       return input.substring(0, input.length - 1);
@@ -3657,6 +3835,7 @@ Future<bool> setServerConfig(
     }
   }
   // api
+  if (errMsgs != null) errMsgs[2].value = '';
   if (config.apiServer.isNotEmpty && errMsgs != null) {
     if (!config.apiServer.startsWith('http://') &&
         !config.apiServer.startsWith('https://')) {
@@ -3665,22 +3844,53 @@ Future<bool> setServerConfig(
       return false;
     }
   }
-  final oldApiServer = await bind.mainGetApiServer();
+  Future<void> publish() async {
+    final setApiFirst = isWeb && config.apiServer.isNotEmpty;
+    if (setApiFirst) {
+      await bind.mainSetOption(key: 'api-server', value: config.apiServer);
+    }
+    await bind.mainSetOption(
+        key: 'custom-rendezvous-server', value: config.idServer);
+    await bind.mainSetOption(
+        key: 'relay-server', value: config.relayServer);
+    if (!setApiFirst) {
+      await bind.mainSetOption(key: 'api-server', value: config.apiServer);
+    }
+    await bind.mainSetOption(key: 'key', value: config.key);
+  }
 
-  // should set one by one
-  await bind.mainSetOption(
-      key: 'custom-rendezvous-server', value: config.idServer);
-  await bind.mainSetOption(key: 'relay-server', value: config.relayServer);
-  await bind.mainSetOption(key: 'api-server', value: config.apiServer);
-  await bind.mainSetOption(key: 'key', value: config.key);
-  final newApiServer = await bind.mainGetApiServer();
-  if (oldApiServer.isNotEmpty &&
-      oldApiServer != newApiServer &&
-      gFFI.userModel.isLogin) {
-    gFFI.userModel.logOut(apiServer: oldApiServer);
+  Future<void> leaveServer(String oldApiServer) async {
+    await bind.mainAccountAuthCancel();
+    final hasToken = bind.mainGetLocalOption(key: 'access_token').isNotEmpty;
+    if (hasToken && oldApiServer.isNotEmpty) {
+      await gFFI.userModel.logOut(apiServer: oldApiServer);
+    } else if (gFFI.userModel.isLogin || hasToken) {
+      await gFFI.userModel.reset(resetOther: true);
+    }
+  }
+
+  final oldWebApiServer = isWeb ? await bind.mainGetApiServer() : null;
+  final bool identityChanged;
+  try {
+    identityChanged = await bind.mainAccountServerIdentityChanged(
+        api: config.apiServer, id: config.idServer, key: config.key);
+  } on FormatException {
+    if (errMsgs != null) {
+      errMsgs[2].value =
+          '${translate("API Server")}: ${translate("Invalid server configuration")}';
+    }
+    return false;
+  }
+  if (identityChanged) {
+    await gFFI.userModel.changeServer(() async {
+      await leaveServer(oldWebApiServer ?? await bind.mainGetApiServer());
+      await publish();
+    });
+  } else {
+    await publish();
   }
   return true;
-}
+});
 
 ColorFilter? svgColor(Color? color) {
   if (color == null) {

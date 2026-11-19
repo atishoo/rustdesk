@@ -48,6 +48,7 @@ class RemotePage extends StatefulWidget {
     this.switchUuid,
     this.forceRelay,
     this.isSharedPassword,
+    this.expectedRendezvous,
   }) : super(key: key) {
     initSharedStates(id);
   }
@@ -63,10 +64,29 @@ class RemotePage extends StatefulWidget {
   final String? switchUuid;
   final bool? forceRelay;
   final bool? isSharedPassword;
+  final String? expectedRendezvous;
   final SimpleWrapper<State<RemotePage>?> _lastState = SimpleWrapper(null);
   final DesktopTabController? tabController;
 
   FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;
+
+  SessionID? get mountedSessionId {
+    final state = _lastState.value;
+    return state is _RemotePageState && state.mounted
+        ? state._sessionFfi?.sessionId
+        : null;
+  }
+
+  bool get hasFixedRendezvous {
+    if (expectedRendezvous != null) return true;
+    final id = mountedSessionId;
+    final scoped = id == null
+        ? null
+        : bind.sessionGetCommonSync(
+            sessionId: id, key: 'has_fixed_route', param: '');
+    // A pending secondary display gets its route from the existing Rust session.
+    return scoped == 'true' || (scoped == null && display != null);
+  }
 
   void releaseMacOSInputForTabTransfer() {
     if (!isMacOS) return;
@@ -129,7 +149,8 @@ class _RemotePageState extends State<RemotePage>
   int? _instanceIdOnEnterOrLeaveImage4Toolbar;
   Function(bool)? _onEnterOrLeaveImage4Toolbar;
 
-  late FFI _ffi;
+  FFI? _sessionFfi;
+  FFI get _ffi => _sessionFfi!;
   Worker? _waylandKeyboardModeWorker;
   bool _waylandKeyboardModeNormalized = false;
   bool _waylandKeyboardModeNormalizing = false;
@@ -150,7 +171,7 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
-    _ffi = FFI(widget.sessionId);
+    _sessionFfi = FFI(widget.sessionId);
     if (isMacOS) {
       // SchedulerBinding.instance.lifecycleState is null in the first connection in a new window.
       _macOSLifecycleState = SchedulerBinding.instance.lifecycleState;
@@ -189,6 +210,7 @@ class _RemotePageState extends State<RemotePage>
       tabWindowId: widget.tabWindowId,
       display: widget.display,
       displays: widget.displays,
+      expectedRendezvous: widget.expectedRendezvous,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);

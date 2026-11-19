@@ -103,6 +103,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           switchUuid: params['switch_uuid'],
           forceRelay: params['forceRelay'],
           isSharedPassword: params['isSharedPassword'],
+          expectedRendezvous: params['expectedRendezvous'],
         ),
       ));
       _update_remote_count();
@@ -276,10 +277,18 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           style: style,
         ),
         proc: () async {
+          final expectedRendezvous = remotePage.expectedRendezvous;
           await DesktopMultiWindow.invokeMethod(
               kMainWindowId,
               kWindowEventMoveTabToNewWindow,
-              '${windowId()},$key,$sessionId,RemoteDesktop');
+              expectedRendezvous == null
+                  ? '${windowId()},$key,$sessionId,RemoteDesktop'
+                  : {
+                      'window_id': windowId(),
+                      'id': key,
+                      'session_id': sessionId.toString(),
+                      'expectedRendezvous': expectedRendezvous,
+                    });
           cancelFunc();
         },
         padding: padding,
@@ -422,14 +431,20 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       RemoteCountState.find().value = tabController.length;
 
   Future<dynamic> _remoteMethodHandler(call, fromWindowId) async {
-    debugPrint(
-        "[Remote Page] call ${call.method} with args ${call.arguments} from window $fromWindowId");
-
     dynamic returnValue;
     // for simplify, just replace connectionId
     if (call.method == kWindowEventNewRemoteDesktop) {
       final args = jsonDecode(call.arguments);
       final id = args['id'];
+      if (tabController.state.value.tabs.any((tab) {
+        final page = tab.page;
+        return tab.key == id && (args['expectedRendezvous'] != null ||
+            (page is RemotePage && page.hasFixedRendezvous));
+      })) {
+        await windowOnTop(windowId());
+        showToast(translate('Already exists'));
+        return false;
+      }
       final switchUuid = args['switch_uuid'];
       final sessionId = args['session_id'];
       final tabWindowId = args['tab_window_id'];
@@ -477,6 +492,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           switchUuid: switchUuid,
           forceRelay: args['forceRelay'],
           isSharedPassword: args['isSharedPassword'],
+          expectedRendezvous: args['expectedRendezvous'],
         ),
       ));
     } else if (call.method == kWindowDisableGrabKeyboard) {
@@ -485,8 +501,50 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       tabController.clear();
     } else if (call.method == kWindowActionRebuild) {
       reloadCurrentWindow();
-    } else if (call.method == kWindowEventActiveSession) {
-      final jumpOk = tabController.jumpToByKey(call.arguments);
+    } else if (call.method == kWindowEventActiveSession ||
+        call.method == kWindowEventActiveRecentSession) {
+      final target = call.arguments;
+      final bool jumpOk;
+      if (call.method == kWindowEventActiveRecentSession && target is Map) {
+        final id = target['id'];
+        final route = target['expectedRendezvous'];
+        if (id is! String || route is! String) return false;
+        final request = jsonEncode([id, route]);
+        jumpOk = tabController.jumpTo(tabController.state.value.tabs.indexWhere((tab) {
+          final page = tab.page;
+          final sessionId = page is RemotePage ? page.mountedSessionId : null;
+          return sessionId != null &&
+              bind.sessionGetCommonSync(
+                      sessionId: sessionId,
+                      key: 'matches_recent_route',
+                      param: request) ==
+                  'true';
+        }));
+      } else if (call.method == kWindowEventActiveSession && target is Map) {
+        final route = target['expectedRendezvous'];
+        if (route is! String) return false;
+        final request = jsonEncode([route, target['forceRelay'] == true]);
+        jumpOk = tabController.jumpTo(tabController.state.value.tabs.indexWhere((tab) {
+          final page = tab.page;
+          if (page is! RemotePage) return false;
+          final sessionId = page.mountedSessionId;
+          return sessionId != null &&
+              page.id == target['id'] &&
+              bind.sessionGetCommonSync(
+                      sessionId: sessionId,
+                      key: 'fixed_route_ready',
+                      param: request) ==
+                  'true';
+        }));
+      } else if (call.method == kWindowEventActiveSession && target is String) {
+        jumpOk = tabController.jumpTo(tabController.state.value.tabs.indexWhere((tab) {
+          final page = tab.page;
+          return tab.key == target &&
+              (page is! RemotePage || !page.hasFixedRendezvous);
+        }));
+      } else {
+        return false;
+      }
       if (jumpOk) {
         windowOnTop(windowId());
       }

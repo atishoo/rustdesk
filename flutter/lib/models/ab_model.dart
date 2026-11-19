@@ -117,26 +117,89 @@ class AbModel {
   /// If `force` is `ForcePullAb.current`, the function will only pull the current address book.
   /// If `quiet` is true, the function will not display any notifications or errors.
   var _pulling = false;
+  var _pullAgain = false;
+  ForcePullAb? _queuedPullForce;
+  var _queuedPullQuiet = true;
+  List<String>? _pullContext;
+  var _pullStale = false;
+
+  Future<bool> _pullIsCurrent() async {
+    final context = _pullContext;
+    if (context == null) return true;
+    final current = await bind.mainAccountRequestContext();
+    final valid = current[0] == context[0] &&
+        current[1] == context[1] &&
+        current[1].isNotEmpty;
+    if (!valid) _pullStale = true;
+    return valid;
+  }
+
   Future<void> pullAb(
       {required ForcePullAb? force, required bool quiet}) async {
     if (bind.isDisableAb()) return;
     if (!gFFI.userModel.isLogin) return;
     if (gFFI.userModel.networkError.isNotEmpty) return;
-    if (_pulling) return;
+    if (_pulling) {
+      _pullAgain = true;
+      if (force == ForcePullAb.listAndCurrent ||
+          _queuedPullForce != ForcePullAb.listAndCurrent) {
+        _queuedPullForce = force;
+      }
+      _queuedPullQuiet = _queuedPullQuiet && quiet;
+      return;
+    }
     if (force == null && _pulledOnce) {
       return;
     }
     _pulling = true;
-    if (!quiet) {
-      _listPullError.value = '';
-      current.pullError.value = '';
-    }
     try {
-      await _pullAb(force: force, quiet: quiet);
-      _refreshTab();
-    } catch (_) {}
-    _pulling = false;
-    _pulledOnce = true;
+      for (var round = 0; round < 2; round++) {
+        _pullAgain = false;
+        _queuedPullForce = null;
+        _queuedPullQuiet = true;
+        _pullStale = false;
+        if (!quiet) {
+          _listPullError.value = '';
+          current.pullError.value = '';
+        }
+        try {
+          _pullContext = await bind.mainAccountRequestContext();
+          if (_pullContext![1].isNotEmpty) {
+            await _pullAb(force: force, quiet: quiet);
+            if (await _pullIsCurrent()) {
+              _refreshTab();
+              _pulledOnce = true;
+            }
+          } else {
+            _pullStale = true;
+          }
+        } catch (_) {
+          if (await _pullIsCurrent()) _pulledOnce = true;
+        } finally {
+          _pullContext = null;
+        }
+        if (_pullStale && round == 0) {
+          _pullAgain = true;
+          _queuedPullForce = ForcePullAb.listAndCurrent;
+          _queuedPullQuiet = _queuedPullQuiet && quiet;
+        }
+        if (_pullStale) {
+          _pulledOnce = false;
+          _listPullError.value = '';
+          current.pullError.value = '';
+        }
+        if (!_pullAgain || round == 1) break;
+        force = _queuedPullForce ?? ForcePullAb.current;
+        quiet = _queuedPullQuiet;
+      }
+    } finally {
+      _pulling = false;
+      if (_pullAgain) {
+        final nextForce = _queuedPullForce ?? ForcePullAb.current;
+        final nextQuiet = _queuedPullQuiet;
+        scheduleMicrotask(() => pullAb(force: nextForce, quiet: nextQuiet));
+      }
+    }
   }
 
   Future<void> _pullAb(
@@ -151,9 +214,11 @@ class AbModel {
         if (!await _getPersonalAbGuid(quiet: quiet)) {
           return;
         }
+        if (!await _pullIsCurrent()) return;
         legacyMode.value = _personalAbGuid == null;
         if (!legacyMode.value && _maxPeerOneAb == 0) {
           await _getAbSettings(quiet: quiet);
+          if (!await _pullIsCurrent()) return;
         }
         if (_personalAbGuid != null) {
           debugPrint("pull ab list");
@@ -162,6 +227,7 @@ class AbModel {
               gFFI.userModel.userName.value, null, ShareRule.read.value, null));
           // get all address book name
           await _getSharedAbProfiles(abProfiles, quiet: quiet);
+          if (!await _pullIsCurrent()) return;
           addressbooks.removeWhere((key, value) =>
               abProfiles.firstWhereOrNull((e) => e.name == key) == null);
           for (int i = 0; i < abProfiles.length; i++) {
@@ -192,11 +258,13 @@ class AbModel {
         }
         // pull current address book
         await current.pullAb(quiet: quiet);
+        if (!await _pullIsCurrent()) return;
         // try initialize personal address book
         if (!current.isPersonal()) {
           final personalAb = addressbooks[_personalAddressBookName];
           if (personalAb != null && !personalAb.initialized) {
             await personalAb.pullAb(quiet: quiet);
+            if (!await _pullIsCurrent()) return;
           }
         }
       } catch (e) {
@@ -207,10 +275,12 @@ class AbModel {
         (!current.initialized || force == ForcePullAb.current)) {
       try {
         await current.pullAb(quiet: quiet);
+        if (!await _pullIsCurrent()) return;
       } catch (e) {
         debugPrint("pull current Ab error: $e");
       }
     }
+    if (!await _pullIsCurrent()) return;
     _callbackPeerUpdate();
     if (listInitialized && current.initialized) {
       _saveCache();
@@ -223,15 +293,16 @@ class AbModel {
           '${translate('pull_ab_failed_tip')}: ${translate(err.toString())}';
     }
     if (statusCode == 401) {
-      gFFI.userModel.reset(resetOther: true);
+      gFFI.userModel.refreshCurrentUser(reloadOtherModels: false);
     }
   }
 
   Future<bool> _getAbSettings({required bool quiet}) async {
     int? statusCode;
     try {
-      final api = "${await bind.mainGetApiServer()}/api/ab/settings";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/settings";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       _setEmptyBody(headers);
       final resp = await http.post(Uri.parse(api), headers: headers);
@@ -262,8 +333,9 @@ class AbModel {
   Future<bool> _getPersonalAbGuid({required bool quiet}) async {
     int? statusCode;
     try {
-      final api = "${await bind.mainGetApiServer()}/api/ab/personal";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/personal";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       _setEmptyBody(headers);
       final resp = await http.post(Uri.parse(api), headers: headers);
@@ -294,7 +366,8 @@ class AbModel {
 
   Future<bool> _getSharedAbProfiles(List<AbProfile> profiles,
       {required bool quiet}) async {
-    final api = "${await bind.mainGetApiServer()}/api/ab/shared/profiles";
+    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final api = "$apiServer/api/ab/shared/profiles";
     int? statusCode;
     try {
       var uri0 = Uri.parse(api);
@@ -312,7 +385,7 @@ class AbModel {
               'current': current.toString(),
               'pageSize': pageSize.toString(),
             });
-        var headers = getHttpHeaders();
+        var headers = Map<String, String>.of(accountHeaders);
         headers['Content-Type'] = "application/json";
         _setEmptyBody(headers);
         final resp = await http.post(uri, headers: headers);
@@ -642,10 +715,18 @@ class AbModel {
     try {
       if (_cacheLoadOnceFlag || currentAbLoading.value) return;
       _cacheLoadOnceFlag = true;
-      final access_token = bind.mainGetLocalOption(key: 'access_token');
-      if (access_token.isEmpty) return;
+      final rawToken = bind.mainGetLocalOption(key: 'access_token');
+      if (rawToken.isEmpty) return;
+      final context = await bind.mainAccountRequestContext();
+      final access_token = context[1];
+      if (access_token != rawToken) return;
       final cache = await bind.mainLoadAb();
       if (currentAbLoading.value) return;
+      final currentContext = await bind.mainAccountRequestContext();
+      if (currentContext[0] != context[0] ||
+          currentContext[1] != access_token) {
+        return;
+      }
       final data = jsonDecode(cache);
       if (data == null || data['access_token'] != access_token) return;
       _deserializeCache(data);
@@ -1007,13 +1088,15 @@ class LegacyAb extends BaseAb {
   @override
   Future<bool> pullAbImpl({quiet = false}) async {
     bool ret = false;
-    final api = "${await bind.mainGetApiServer()}/api/ab";
+    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final api = "$apiServer/api/ab";
     int? statusCode;
     try {
-      var authHeaders = getHttpHeaders();
+      var authHeaders = Map<String, String>.of(accountHeaders);
       authHeaders['Content-Type'] = "application/json";
       authHeaders['Accept-Encoding'] = "gzip";
       final resp = await http.get(Uri.parse(api), headers: authHeaders);
+      if (!await gFFI.abModel._pullIsCurrent()) return false;
       statusCode = resp.statusCode;
       if (resp.body.toLowerCase() == "null") {
         // normal reply, empty ab return null
@@ -1045,7 +1128,7 @@ class LegacyAb extends BaseAb {
     } finally {
       if (pullError.isNotEmpty) {
         if (statusCode == 401) {
-          gFFI.userModel.reset(resetOther: true);
+          gFFI.userModel.refreshCurrentUser(reloadOtherModels: false);
         }
       }
     }
@@ -1061,8 +1144,9 @@ class LegacyAb extends BaseAb {
     try {
       //https: //stackoverflow.com/questions/68249333/flutter-getx-updating-item-in-children-list-is-not-reactive
       peers.refresh();
-      final api = "${await bind.mainGetApiServer()}/api/ab";
-      var authHeaders = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab";
+      var authHeaders = Map<String, String>.of(accountHeaders);
       authHeaders['Content-Type'] = "application/json";
       final body = jsonEncode({"data": jsonEncode(_serialize())});
       http.Response resp =
@@ -1415,11 +1499,12 @@ class Ab extends BaseAb {
     if (!await _fetchPeers(tmpPeers, quiet: quiet)) {
       ret = false;
     }
-    peers.value = tmpPeers;
     List<AbTag> tmpTags = [];
     if (!await _fetchTags(tmpTags, quiet: quiet)) {
       ret = false;
     }
+    if (!await gFFI.abModel._pullIsCurrent()) return false;
+    peers.value = tmpPeers;
     tags.value = tmpTags.map((e) => e.name).toList();
     Map<String, int> tmpTagColors = {};
     for (var t in tmpTags) {
@@ -1430,7 +1515,8 @@ class Ab extends BaseAb {
   }
 
   Future<bool> _fetchPeers(List<Peer> tmpPeers, {quiet = false}) async {
-    final api = "${await bind.mainGetApiServer()}/api/ab/peers";
+    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final api = "$apiServer/api/ab/peers";
     int? statusCode;
     try {
       var uri0 = Uri.parse(api);
@@ -1449,7 +1535,7 @@ class Ab extends BaseAb {
               'pageSize': pageSize.toString(),
               'ab': profile.guid,
             });
-        var headers = getHttpHeaders();
+        var headers = Map<String, String>.of(accountHeaders);
         headers['Content-Type'] = "application/json";
         _setEmptyBody(headers);
         final resp = await http.post(uri, headers: headers);
@@ -1489,7 +1575,7 @@ class Ab extends BaseAb {
     } finally {
       if (pullError.isNotEmpty) {
         if (statusCode == 401) {
-          gFFI.userModel.reset(resetOther: true);
+          gFFI.userModel.refreshCurrentUser(reloadOtherModels: false);
         }
       }
     }
@@ -1497,7 +1583,8 @@ class Ab extends BaseAb {
   }
 
   Future<bool> _fetchTags(List<AbTag> tmpTags, {quiet = false}) async {
-    final api = "${await bind.mainGetApiServer()}/api/ab/tags/${profile.guid}";
+    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final api = "$apiServer/api/ab/tags/${profile.guid}";
     int? statusCode;
     try {
       var uri0 = Uri.parse(api);
@@ -1507,7 +1594,7 @@ class Ab extends BaseAb {
         path: uri0.path,
         port: uri0.port,
       );
-      var headers = getHttpHeaders();
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       _setEmptyBody(headers);
       final resp = await http.post(uri, headers: headers);
@@ -1536,7 +1623,7 @@ class Ab extends BaseAb {
     } finally {
       if (pullError.isNotEmpty) {
         if (statusCode == 401) {
-          gFFI.userModel.reset(resetOther: true);
+          gFFI.userModel.refreshCurrentUser(reloadOtherModels: false);
         }
       }
     }
@@ -1547,9 +1634,9 @@ class Ab extends BaseAb {
   @override
   Future<String?> addPeers(List<Map<String, dynamic>> ps) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/peer/add/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/peer/add/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       for (var p in ps) {
         if (peers.firstWhereOrNull((e) => e.id == p['id']) != null) {
@@ -1580,9 +1667,9 @@ class Ab extends BaseAb {
   @override
   Future<bool> changeTagForPeers(List<String> ids, List<dynamic> tags) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/peer/update/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/peer/update/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       var ret = true;
       for (var id in ids) {
@@ -1606,9 +1693,9 @@ class Ab extends BaseAb {
   @override
   Future<bool> changeAlias({required String id, required String alias}) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/peer/update/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/peer/update/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       final body = jsonEncode({"id": id, "alias": alias});
       final resp = await http.put(Uri.parse(api), headers: headers, body: body);
@@ -1627,9 +1714,9 @@ class Ab extends BaseAb {
   @override
   Future<bool> changeNote({required String id, required String note}) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/peer/update/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/peer/update/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       final body = jsonEncode({"id": id, "note": note});
       final resp = await http.put(Uri.parse(api), headers: headers, body: body);
@@ -1647,9 +1734,9 @@ class Ab extends BaseAb {
 
   Future<bool> _setPassword(Object bodyContent) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/peer/update/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/peer/update/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       final body = jsonEncode(bodyContent);
       final resp = await http.put(Uri.parse(api), headers: headers, body: body);
@@ -1682,9 +1769,9 @@ class Ab extends BaseAb {
   Future<void> syncFromRecent(List<Peer> recents) async {
     bool uiUpdate = false;
     bool saveCache = false;
-    final api =
-        "${await bind.mainGetApiServer()}/api/ab/peer/update/${profile.guid}";
-    var headers = getHttpHeaders();
+    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final api = "$apiServer/api/ab/peer/update/${profile.guid}";
+    var headers = Map<String, String>.of(accountHeaders);
     headers['Content-Type'] = "application/json";
 
     Future<bool> trySyncOnePeer(Peer p, Peer r) async {
@@ -1751,9 +1838,9 @@ class Ab extends BaseAb {
   @override
   Future<bool> deletePeers(List<String> ids) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/peer/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/peer/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       final body = jsonEncode(ids);
       final resp =
@@ -1776,9 +1863,9 @@ class Ab extends BaseAb {
   Future<bool> addTags(
       List<String> tagList, Map<String, int> tagColorMap) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/tag/add/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/tag/add/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       for (var t in tagList) {
         final body = jsonEncode({
@@ -1809,9 +1896,9 @@ class Ab extends BaseAb {
       return false;
     }
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/tag/rename/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/tag/rename/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       final body = jsonEncode({
         "old": oldTag,
@@ -1833,9 +1920,9 @@ class Ab extends BaseAb {
   @override
   Future<bool> setTagColor(String tag, Color color) async {
     try {
-      final api =
-          "${await bind.mainGetApiServer()}/api/ab/tag/update/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/tag/update/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       final body = jsonEncode({
         "name": tag,
@@ -1857,8 +1944,9 @@ class Ab extends BaseAb {
   @override
   Future<bool> deleteTag(String tag) async {
     try {
-      final api = "${await bind.mainGetApiServer()}/api/ab/tag/${profile.guid}";
-      var headers = getHttpHeaders();
+      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final api = "$apiServer/api/ab/tag/${profile.guid}";
+      var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
       final body = jsonEncode([tag]);
       final resp =

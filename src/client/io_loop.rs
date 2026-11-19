@@ -204,7 +204,7 @@ impl<T: InvokeUiSession> Remote<T> {
         )
         .await
         {
-            Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server))) => {
+            Ok(((mut peer, direct, pk, kcp, stream_type), rendezvous)) => {
                 self.handler
                     .connection_round_state
                     .lock()
@@ -217,7 +217,8 @@ impl<T: InvokeUiSession> Remote<T> {
                     pk.as_deref(),
                 );
                 match trust {
-                    Ok(trust) => {
+                    Ok(mut trust) => {
+                        trust.password_scope = rendezvous.password_scope();
                         self.trusted_device = trust;
                         self.handler.lc.write().unwrap().enable_trusted_devices = false;
                     }
@@ -284,7 +285,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     crate::rustdesk_interval(time::interval(Duration::new(1, 0)));
                 let mut fps_instant = Instant::now();
 
-                let _keep_it = client::hc_connection(feedback, rendezvous_server, token).await;
+                let _keep_it = client::hc_connection(rendezvous).await;
                 let mut last_recv_time = Instant::now();
                 let mut webrtc_suspect_since: Option<Instant> = None;
                 let mut last_rx_progress = peer.rx_progress();
@@ -1759,17 +1760,28 @@ impl<T: InvokeUiSession> Remote<T> {
                         self.set_peer_info(&pi);
                         if self.handler.is_view_camera() {
                             if !self.check_view_camera_support(&peer_version, &peer_platform) {
-                                self.handler.lc.write().unwrap().handle_peer_info(&pi);
+                                self.handler.lc.write().unwrap().handle_peer_info(&pi, &self.trusted_device);
                                 return false;
                             }
                         }
                         if self.handler.is_terminal() {
                             if !self.check_terminal_support(&peer_version) {
-                                self.handler.lc.write().unwrap().handle_peer_info(&pi);
+                                self.handler.lc.write().unwrap().handle_peer_info(&pi, &self.trusted_device);
                                 return false;
                             }
                         }
-                        self.handler.handle_peer_info(pi);
+                        if self.handler.is_default() && !pi.displays.is_empty() {
+                            let password = self.handler.lc.read().unwrap().should_auto_login(
+                                self.trusted_device.password_scope.as_deref(),
+                            );
+                            if !password.is_empty() {
+                                let mut handler = self.handler.clone();
+                                // Delayed input must stay on the transport authenticated above.
+                                handler.sender = Arc::new(RwLock::new(Some(self.sender.clone())));
+                                crate::client::auto_login(password, &pi, handler);
+                            }
+                        }
+                        self.handler.handle_peer_info(pi, &self.trusted_device);
                         #[cfg(all(target_os = "windows", not(feature = "flutter")))]
                         self.check_clipboard_file_context();
                         if self.handler.is_default() {

@@ -15,7 +15,12 @@ class AddressBook: Reactor.Component
     }();
     
     function render() {
-        if (!handler.get_local_option("access_token")) {
+        if (!accountSessionVerified) {
+            if (accountSessionRetry) {
+                return <div style="margin: *; text-align: center;">{abError || translate("network_error_tip")}
+                    <div #retry .link style="margin-left: 1em;">{translate("Retry")}</div>
+                </div>;
+            }
             return <div style="margin: *"><div #login-link .link style="margin: *; width: 100px; text-align: center; font-size: 1.2em;">{translate("Login")}</div></div>;
         }
         if (abLoading) {
@@ -647,10 +652,14 @@ function getAb() {
     abLoading = true;
     abError = "";
     app.update();
-    httpRequest(handler.get_api_server() + "/api/ab/get", #post, {}, function(data) {
+    var accountContext = JSON.parse(handler.account_request_context());
+    if (!accountContext[1]) { invalidateAccountUi(); return; }
+    httpRequest(accountContext[0] + "/api/ab/get", #post, {}, function(data) {
+        if (!isCurrentAccountContext(accountContext)) return;
         if (data) {
             if (data.error) {
                 handleAbError(data.error);
+                if (data.error == 'Invalid token') refreshCurrentUser(false);
                 return;
             }
             var tm = data.updated_at;
@@ -661,14 +670,19 @@ function getAb() {
         abLoading = false;
         app.update();
     }, function(err, status) {
+        if (!isCurrentAccountContext(accountContext)) return;
         handleAbError(err);
-    }, getHttpHeaders());
+        if (status == 401) refreshCurrentUser(false);
+    }, getHttpHeaders(accountContext));
 }
 
 function updateAb() {
-    httpRequest(handler.get_api_server() + "/api/ab", #post, { data: JSON.stringify(ab) }, function(data) {
+    var accountContext = JSON.parse(handler.account_request_context());
+    if (!accountContext[1]) { invalidateAccountUi(); return; }
+    httpRequest(accountContext[0] + "/api/ab", #post, { data: JSON.stringify(ab) }, function(data) {
     }, function(err, status) {
-    }, getHttpHeaders());
+        if (isCurrentAccountContext(accountContext) && status == 401) refreshCurrentUser(false);
+    }, getHttpHeaders(accountContext));
 }
 
 function resetAb() {

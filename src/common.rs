@@ -1893,7 +1893,7 @@ async fn get_http_response_async(
                 );
                 Ok(resp)
             }
-            Err(e) => Err(anyhow!("{:?}", e)),
+            Err(e) => Err(e.into()),
         }
     } else {
         if let Some(b) = body.clone() {
@@ -1946,7 +1946,7 @@ async fn get_http_response_async(
                         .await
                     }
                 } else {
-                    Err(anyhow!("{:?}", e))
+                    Err(e.into())
                 }
             }
         }
@@ -2156,23 +2156,40 @@ pub fn decode64<T: AsRef<[u8]>>(input: T) -> Result<Vec<u8>, base64::DecodeError
 }
 
 pub async fn get_key(sync: bool) -> String {
+    let key = get_configured_key(sync).await;
+    if key.is_empty() {
+        config::RS_PUB_KEY.to_owned()
+    } else {
+        key
+    }
+}
+
+pub(crate) async fn get_configured_key(sync: bool) -> String {
     #[cfg(windows)]
-    if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-        if !lic.key.is_empty() {
-            return lic.key;
+    {
+        let license_key = configured_key(String::new());
+        if !license_key.is_empty() {
+            return license_key;
         }
     }
     #[cfg(target_os = "ios")]
-    let mut key = Config::get_option("key");
+    let key = Config::get_option("key");
     #[cfg(not(target_os = "ios"))]
-    let mut key = if sync {
+    let key = if sync {
         Config::get_option("key")
     } else {
         let mut options = crate::ipc::get_options_async().await;
         options.remove("key").unwrap_or_default()
     };
-    if key.is_empty() {
-        key = config::RS_PUB_KEY.to_owned();
+    key
+}
+
+pub(crate) fn configured_key(key: String) -> String {
+    #[cfg(windows)]
+    if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
+        if !lic.key.is_empty() {
+            return lic.key;
+        }
     }
     key
 }
@@ -2303,7 +2320,7 @@ async fn secure_tcp_impl(conn: &mut Stream, key: &str, log_on_success: bool) -> 
 /// The server's key exchange on `conn`. `Ok(true)` once the stream is encrypted. `Ok(false)`
 /// when the server sent something else first, nothing parseable, or closed: `secure_tcp`
 /// tolerates that for servers from before the exchange, `secure_tcp_required` does not.
-async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> ResultType<bool> {
+pub(crate) async fn key_exchange(conn: &mut Stream, key: &str, log_on_success: bool) -> ResultType<bool> {
     let rs_pk = get_rs_pk(key);
     let Some(rs_pk) = rs_pk else {
         bail!("Handshake failed: invalid public key from rendezvous server");

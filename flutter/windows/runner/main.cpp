@@ -49,10 +49,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
-  // Remove possible trailing whitespace from command line arguments
+  // Utf8FromUtf16 includes the terminating NUL in the string length.
   for (auto& argument : command_line_arguments) {
-    argument.erase(argument.find_last_not_of(" \n\r\t"));
+    if (!argument.empty() && argument.back() == '\0') {
+      argument.pop_back();
+    }
   }
+  const bool has_play_argument =
+      std::find(command_line_arguments.begin(), command_line_arguments.end(),
+                "--play") != command_line_arguments.end();
 
   int args_len = 0;
   char** c_args = rustdesk_core_main(&args_len);
@@ -67,6 +72,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
   std::vector<std::string> rust_args(c_args, c_args + args_len);
   free_c_args(c_args, args_len);
+  const bool has_normalized_play_link = has_play_argument && rust_args.size() == 1 &&
+      rust_args.front().find("://") != std::string::npos;
+  if (has_normalized_play_link) {
+    // Rust has already replaced the associated file with a connection URI.
+    command_line_arguments.swap(rust_args);
+    rust_args.clear();
+  }
   FUNC_RUSTDESK_IS_DISABLE_INSTALLATION rustdesk_is_disable_installation =
       (FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)GetProcAddress(hInstance, "rustdesk_is_disable_installation");
   bool is_disable_installation =
@@ -117,7 +129,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
           ::AllowSetForegroundWindow(pid);
         }
         // Dispatch command line arguments
-        DispatchToUniLinksDesktop(hwnd);
+        if (has_normalized_play_link) {
+          auto& link = command_line_arguments.front();
+          COPYDATASTRUCT data = {UNI_LINKS_DESKTOP_MSG_ID,
+                                 static_cast<DWORD>(link.size() + 1), link.data()};
+          ::SendMessageW(hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data));
+        } else {
+          DispatchToUniLinksDesktop(hwnd);
+        }
       } else {
         // Not called with arguments, or just open the app shortcut on desktop.
         // So we just show the main window instead.

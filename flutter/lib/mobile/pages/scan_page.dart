@@ -8,7 +8,6 @@ import 'package:qr_code_scanner/qr_code_scanner.dart';
 import 'package:zxing2/qrcode.dart';
 
 import '../../common.dart';
-import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
 
 class ScanPage extends StatefulWidget {
@@ -97,8 +96,8 @@ class _ScanPageState extends State<ScanPage> {
 
         var reader = QRCodeReader();
         var result = reader.decode(bitmap);
-        if (result.text.startsWith(bind.mainUriPrefixSync())) {
-          handleUriLink(uriString: result.text);
+        if (isRustDeskUri(result.text)) {
+          await handleUriLink(uriString: result.text);
         } else {
           showServerSettingFromQr(result.text);
         }

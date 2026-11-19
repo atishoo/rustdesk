@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     ffi::c_void,
-    net::SocketAddr,
+    net::{Ipv6Addr, SocketAddr},
     ops::Deref,
     str::FromStr,
     sync::{
@@ -68,7 +68,7 @@ use hbb_common::{
         time::{interval, Duration, Instant},
     },
     webrtc::WebRTCStream,
-    websocket::{check_ws, is_ws_endpoint},
+    websocket::{check_ws, is_ws_endpoint, WsFramedStream},
     AddrMangle, ResultType, Stream,
 };
 use base::{
@@ -367,10 +367,317 @@ fn tcp_punch_allowed() -> bool {
             || crate::get_webrtc_enabled())
 }
 
+fn ipv6_host(address: &str) -> Option<Ipv6Addr> {
+    address
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(address)
+        .parse()
+        .ok()
+}
+
+pub(crate) fn rendezvous_server_address(server: &str) -> String {
+    if let Some(address) = ipv6_host(server) {
+        format!("[{address}]:{RENDEZVOUS_PORT}")
+    } else {
+        check_port(server, RENDEZVOUS_PORT)
+    }
+}
+
+pub(crate) fn is_uri_direct_access(peer: &str) -> bool {
+    crate::common::is_direct_ip_access(peer)
+        || ipv6_host(peer).is_some()
+        || peer.parse::<std::net::SocketAddrV6>().is_ok()
+}
+
+pub(crate) fn rendezvous_transport_endpoint(server: &str) -> String {
+    let endpoint = rendezvous_server_address(server);
+    if hbb_common::webrtc::is_webrtc_endpoint(&endpoint) {
+        return endpoint;
+    }
+    if let Ok(SocketAddr::V6(address)) = endpoint.parse() {
+        if use_ws() && address.scope_id() == 0 {
+            return format!("ws://[{}]:{}", address.ip(), i32::from(address.port()) + 2);
+        }
+        return endpoint;
+    }
+    check_ws(&endpoint)
+}
+
+fn split_fixed_host_port(endpoint: &str) -> Option<(String, i32)> {
+    if let Ok(SocketAddr::V6(address)) = endpoint.parse() {
+        let (host, _) = endpoint.rsplit_once(':')?;
+        return (address.port() > 0).then(|| (host.to_owned(), i32::from(address.port())));
+    }
+    hbb_common::socket_client::split_host_port(endpoint)
+}
+
+pub(crate) fn same_rendezvous_endpoint(server: &str, current: &str) -> bool {
+    !server.is_empty()
+        && !current.is_empty()
+        && (server == current
+            || rendezvous_endpoint_identity(server) == rendezvous_endpoint_identity(current))
+}
+
+pub(crate) fn is_public_rendezvous_endpoint(endpoint: &str) -> bool {
+    RENDEZVOUS_SERVERS.iter().any(|server| {
+        same_rendezvous_endpoint(endpoint, &check_port(server, RENDEZVOUS_PORT))
+            || same_rendezvous_endpoint(endpoint, &format!("ws://{server}/ws/id"))
+            || same_rendezvous_endpoint(endpoint, &format!("wss://{server}/ws/id"))
+    })
+}
+
+pub(crate) fn rendezvous_endpoint_identity(endpoint: &str) -> String {
+    let Some((scheme, path, query)) = rendezvous_url_path(endpoint) else {
+        if let Ok(address) = endpoint.parse::<SocketAddr>() {
+            return address.to_string();
+        }
+        return endpoint.to_ascii_lowercase();
+    };
+    if matches!(scheme, "ws" | "wss") {
+        if let Ok(url) = url::Url::parse(endpoint) {
+            if url.host_str().is_some() {
+                let authority = &url[url::Position::BeforeUsername..url::Position::AfterPort];
+                return format!("{scheme}://{authority}{path}{query}");
+            }
+        }
+    }
+    endpoint.to_owned()
+}
+
+fn rendezvous_url_path(endpoint: &str) -> Option<(&str, &str, &str)> {
+    let (scheme, rest) = endpoint.split_once("://")?;
+    let path_start = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let rest = &rest[path_start..];
+    let (path, query) = rest.split_at(rest.find(['?', '#']).unwrap_or(rest.len()));
+    Some((scheme, if path.is_empty() { "/" } else { path }, query))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExpectedRendezvous {
+    pub(crate) server: String,
+    pub(crate) key: String,
+    #[serde(default)]
+    pub(crate) fixed_endpoint: bool,
+}
+
+impl ExpectedRendezvous {
+    #[cfg(feature = "flutter")]
+    pub(crate) fn matches_endpoint(&self, endpoint: &str, key: &str) -> bool {
+        let server = if self.server == PUBLIC_SERVER {
+            RENDEZVOUS_SERVERS[0]
+        } else {
+            &self.server
+        };
+        self.key == key && same_rendezvous_endpoint(&rendezvous_server_address(server), endpoint)
+    }
+}
+
+pub(crate) fn valid_uri_rendezvous(server: &str) -> bool {
+    !server.is_empty()
+        && !server.contains('#')
+        && (server == PUBLIC_SERVER
+            || is_ws_endpoint(server)
+            || hbb_common::webrtc::is_webrtc_endpoint(server)
+            || split_fixed_host_port(&rendezvous_server_address(server))
+                .is_some_and(|(host, port)| !host.is_empty() && u16::try_from(port).is_ok()))
+}
+
+pub(crate) async fn current_link_rendezvous() -> Option<(String, String, String)> {
+    let (server, _, _) = crate::get_rendezvous_server(1_000).await;
+    if !valid_uri_rendezvous(&server) {
+        return None;
+    }
+    let key = crate::get_configured_key(false).await;
+    let endpoint = rendezvous_transport_endpoint(&server);
+    (key.is_empty() || get_rs_pk(&key).is_some()).then_some((server, endpoint, key))
+}
+
+pub(crate) async fn current_expected_rendezvous(
+    peer: &str,
+    server: &str,
+    key: &str,
+    restore_recent_identity: bool,
+) -> Option<String> {
+    if is_uri_direct_access(crate::ui_interface::handle_relay_id(peer))
+        || server.is_empty()
+        || server == PUBLIC_SERVER
+        || (!key.is_empty() && get_rs_pk(key).is_none())
+    {
+        return None;
+    }
+    let (current, endpoint, configured_key) = current_link_rendezvous().await?;
+    if configured_key != key {
+        return None;
+    }
+    (if restore_recent_identity {
+        same_rendezvous_endpoint(server, &endpoint)
+    } else {
+        (!endpoint.contains("://") || is_ws_endpoint(&endpoint))
+            && same_rendezvous_endpoint(
+                &rendezvous_server_address(server),
+                &rendezvous_server_address(&current),
+            )
+    })
+    .then_some(endpoint)
+}
+
+fn saved_rendezvous_matches(server: &str, endpoint: &str) -> bool {
+    let source = rendezvous_server_address(server);
+    if same_rendezvous_endpoint(&source, endpoint) {
+        return true;
+    }
+    if server == PUBLIC_SERVER {
+        return RENDEZVOUS_SERVERS
+            .iter()
+            .any(|public| saved_rendezvous_matches(public, endpoint));
+    }
+    let Some((host, port)) = split_fixed_host_port(&source) else {
+        return false;
+    };
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some((scheme, path, query)) = rendezvous_url_path(endpoint) else {
+        return false;
+    };
+    if !matches!(scheme, "ws" | "wss")
+        || url.host().map(|host| host.to_owned()) != url::Host::parse(&host).ok()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !query.is_empty()
+    {
+        return false;
+    }
+    if source.parse::<SocketAddr>().is_ok() || hbb_common::is_ip_str(&source) {
+        return scheme == "ws"
+            && path == "/"
+            && url.port_or_known_default().map(i32::from) == Some(port + 2);
+    }
+    matches!(path, "/ws/id" | "/ws/relay")
+}
+
+#[derive(Clone, Copy)]
+enum PinnedRendezvous {
+    Tcp,
+    VerifiedWss,
+    AnonymousWebSocket,
+    AnonymousWebRtc,
+}
+
+async fn connect_pinned_rendezvous(
+    endpoint: &str,
+    transport: PinnedRendezvous,
+) -> ResultType<Stream> {
+    match transport {
+        PinnedRendezvous::VerifiedWss => {
+            WsFramedStream::new_verified_wss(endpoint, CONNECT_TIMEOUT)
+                .await
+                .map(Stream::WebSocket)
+        }
+        PinnedRendezvous::AnonymousWebSocket => {
+            WsFramedStream::new(endpoint, None, CONNECT_TIMEOUT)
+                .await
+                .map(Stream::WebSocket)
+        }
+        PinnedRendezvous::AnonymousWebRtc => connect_tcp(endpoint, CONNECT_TIMEOUT).await,
+        PinnedRendezvous::Tcp => connect_tcp_local(endpoint, None, CONNECT_TIMEOUT).await,
+    }
+}
+
+pub(crate) fn websocket_gateway_relay(rendezvous: &str) -> Option<String> {
+    let (scheme, path, query) = rendezvous_url_path(rendezvous)?;
+    let url = url::Url::parse(rendezvous).ok()?;
+    if !matches!(scheme, "ws" | "wss")
+        || !query.is_empty()
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != path
+    {
+        return None;
+    }
+    let (rendezvous, trailing_slash) = rendezvous
+        .strip_suffix('/')
+        .map_or((rendezvous, ""), |endpoint| (endpoint, "/"));
+    rendezvous
+        .strip_suffix("/ws/id")
+        .map(|gateway| format!("{gateway}/ws/relay{trailing_slash}"))
+}
+
+fn websocket_relay_endpoint(relay: &str, id_endpoint: &str) -> ResultType<String> {
+    let (host, port) = split_fixed_host_port(relay)
+        .context("Invalid relay server address")?;
+    let path = rendezvous_url_path(id_endpoint)
+        .and_then(|(_, path, query)| query.is_empty().then_some(path));
+    let rendezvous = url::Url::parse(id_endpoint)?;
+    let scheme = rendezvous.scheme();
+    let same_host = rendezvous.host().map(|host| host.to_owned()) == url::Host::parse(&host).ok()
+        && rendezvous.username().is_empty()
+        && rendezvous.password().is_none();
+    if same_host && port == RELAY_PORT {
+        if let Some(relay) = websocket_gateway_relay(id_endpoint) {
+            return Ok(relay);
+        }
+    }
+    let native_listener = same_host && scheme == "ws" && path == Some("/");
+    if port != RELAY_PORT
+        || native_listener
+        || relay.parse::<SocketAddr>().is_ok()
+        || hbb_common::is_ip_str(relay)
+    {
+        let port = u16::try_from(port)
+            .ok()
+            .and_then(|port| port.checked_add(2))
+            .context("Invalid relay server port")?;
+        return Ok(format!("ws://{host}:{port}"));
+    }
+    let port =
+        hbb_common::websocket::websocket_port(&host, &Config::get_option(keys::OPTION_RELAY_SERVER));
+    let port = port.map_or_else(String::new, |port| format!(":{port}"));
+    Ok(format!("{scheme}://{host}{port}/ws/relay"))
+}
+
+async fn connect_legacy_rendezvous(server: &str, endpoint: &mut String) -> ResultType<Stream> {
+    *endpoint = if hbb_common::webrtc::is_webrtc_endpoint(server) {
+        server.to_owned()
+    } else {
+        check_ws(server)
+    };
+    if endpoint.contains("://") {
+        connect_tcp(endpoint.as_str(), CONNECT_TIMEOUT).await
+    } else {
+        connect_tcp_local(endpoint.as_str(), None, CONNECT_TIMEOUT).await
+    }
+}
+
+#[derive(Default)]
+pub struct RendezvousFeedback {
+    feedback: i32,
+    server: String,
+    token: String,
+    key: String,
+    pinned_rendezvous: Option<PinnedRendezvous>,
+}
+
+impl RendezvousFeedback {
+    pub(crate) fn password_scope(&self) -> Option<String> {
+        if self.server.is_empty() {
+            return None;
+        }
+        let endpoint = rendezvous_endpoint_identity(&self.server);
+        let mut digest = Sha256::new();
+        digest.update((endpoint.len() as u64).to_le_bytes());
+        digest.update(endpoint);
+        digest.update(&self.key);
+        Some(hex::encode(digest.finalize()))
+    }
+}
+
 impl Client {
     const CLIENT_CLIPBOARD_NAME: &'static str = "client-clipboard";
 
-    /// Start a new connection.
+    /// Start a new connection and return the login token allowed for its health check.
     pub async fn start(
         peer: &str,
         key: &str,
@@ -385,7 +692,7 @@ impl Client {
             Option<KcpStream>,
             &'static str,
         ),
-        (i32, String),
+        RendezvousFeedback,
     )> {
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
@@ -400,6 +707,66 @@ impl Client {
                 }
             }
             Ok(x) => {
+                #[cfg(feature = "flutter")]
+                {
+                    let lch = interface.get_lch();
+                    lch.write().unwrap().confirmed_rendezvous = (x.1.pinned_rendezvous.is_some()
+                        && !(x.1.server.starts_with("wss://")
+                            && matches!(x.1.pinned_rendezvous, Some(PinnedRendezvous::AnonymousWebSocket))))
+                    .then(|| x.1.server.clone());
+                }
+                #[cfg(windows)]
+                {
+                    let endpoint = &x.1.server;
+                    let connected_key = &x.1.key;
+                    let prefer_current = !peer.contains('@')
+                        && !endpoint.is_empty()
+                        && (!endpoint.contains("://") || is_ws_endpoint(endpoint));
+                    // Reopening these sessions as fixed links can omit the legacy account token.
+                    let skip_legacy_token_recent = prefer_current
+                        && (!endpoint.contains("://") || endpoint.starts_with("ws://"))
+                        && x.1.pinned_rendezvous.is_none()
+                        && !x.1.token.is_empty();
+                    let (omitted_public_key, peer_relay) = {
+                        let lch = interface.get_lch();
+                        let lch = lch.read().unwrap();
+                        let omitted_public_key =
+                            lch.expected_rendezvous.as_ref().is_some_and(|expected| {
+                                expected.key.is_empty() && is_public_rendezvous_endpoint(endpoint)
+                            });
+                        (omitted_public_key, lch.peer_relay)
+                    };
+                    let actual_key = if connected_key == config::RS_PUB_KEY
+                        && (omitted_public_key
+                            || peer.split_once('@').is_some_and(|(_, server)| server == PUBLIC_SERVER)
+                            || (!peer.contains('@') && crate::get_configured_key(true).await.is_empty()))
+                    {
+                        ""
+                    } else {
+                        connected_key
+                    };
+                    let relay = if peer_relay { "/r" } else { "" };
+                    let target = match peer.split_once('@') {
+                        Some((id, server)) => format!("{id}{relay}@{server}"),
+                        None if !endpoint.is_empty() => format!("{peer}{relay}@{endpoint}"),
+                        None => peer.to_owned(),
+                    };
+                    let saved_endpoint = if peer.contains('@') {
+                        endpoint.clone()
+                    } else {
+                        String::new()
+                    };
+                    let usable_key = actual_key.is_empty() || get_rs_pk(actual_key).is_some();
+                    interface.get_lch().write().unwrap().recent_connection =
+                        (!skip_legacy_token_recent && usable_key).then(|| {
+                            crate::ui_session_interface::RecentConnection {
+                                target,
+                                key: actual_key.to_owned(),
+                                prefer_current,
+                                endpoint: saved_endpoint,
+                            }
+                        });
+                }
                 // Set x.2 to true only in the connect() function to indicate that direct_failures needs to be updated; everywhere else it should be set to false.
                 if x.2 {
                     let direct_failures = interface.get_lch().read().unwrap().direct_failures;
@@ -430,12 +797,64 @@ impl Client {
             Option<KcpStream>,
             &'static str,
         ),
-        (i32, String),
+        RendezvousFeedback,
         bool,
     )> {
         if config::is_incoming_only() && !is_switch_sides_back(conn_type, &interface).await {
             bail!("Incoming only mode");
         }
+        let (attached_server, expected_rendezvous, inherited_rendezvous) = {
+            let lch = interface.get_lch();
+            let lch = lch.read().unwrap();
+            (
+                lch.other_server.clone(),
+                lch.expected_rendezvous.clone(),
+                lch.inherited_rendezvous.clone(),
+            )
+        };
+        if expected_rendezvous.is_some()
+            && attached_server
+                .as_ref()
+                .is_some_and(|(_, server, _)| !valid_uri_rendezvous(server))
+        {
+            bail!("Invalid ID server in this connection link");
+        }
+        let pinned_endpoint = match (&expected_rendezvous, &attached_server, inherited_rendezvous) {
+            (Some(_), None, Some(endpoint)) => {
+                if !valid_uri_rendezvous(&endpoint)
+                    || is_uri_direct_access(crate::ui_interface::handle_relay_id(peer))
+                {
+                    bail!("Invalid ID server in this connection link");
+                }
+                Some(endpoint)
+            }
+            (Some(expected), None, None) => Some(
+                current_expected_rendezvous(peer, &expected.server, &expected.key, true)
+                    .await
+                    .context("The configured ID server no longer matches this connection link")?,
+            ),
+            (Some(expected), Some((_, server, _)), _)
+                if server == PUBLIC_SERVER
+                    && !expected.key.is_empty()
+                    && expected.key != config::RS_PUB_KEY =>
+            {
+                bail!("Key mismatch");
+            }
+            (Some(expected), Some((_, server, _)), _) if expected.fixed_endpoint => {
+                if !saved_rendezvous_matches(server, &expected.server) {
+                    bail!("The saved ID server does not match this connection link");
+                }
+                Some(expected.server.clone())
+            }
+            (Some(_), Some((_, server, _)), _) => Some(rendezvous_server_address(
+                if server == PUBLIC_SERVER {
+                    RENDEZVOUS_SERVERS[0]
+                } else {
+                    server
+                },
+            )),
+            _ => None,
+        };
         // to-do: remember the port for each peer, so that we can retry easier
         if hbb_common::is_ip_str(peer) {
             return Ok((
@@ -447,7 +866,7 @@ impl Client {
                     None,
                     "TCP",
                 ),
-                (0, "".to_owned()),
+                RendezvousFeedback::default(),
                 false,
             ));
         }
@@ -461,18 +880,63 @@ impl Client {
                     None,
                     "TCP",
                 ),
-                (0, "".to_owned()),
+                RendezvousFeedback::default(),
                 false,
             ));
         }
 
-        let other_server = interface.get_lch().read().unwrap().other_server.clone();
-        let (peer, other_server, key, token) = if let Some((a, b, c)) = other_server.as_ref() {
-            (a.as_ref(), b.as_ref(), c.as_ref(), "")
+        let (peer, other_server, key, token) = if let Some((peer, server, attached_key)) =
+            attached_server.as_ref()
+        {
+            let token = if server != PUBLIC_SERVER
+                && pinned_endpoint
+                    .as_deref()
+                    .is_some_and(|endpoint| endpoint.starts_with("wss://"))
+            {
+                token
+            } else {
+                ""
+            };
+            (peer.as_str(), server.as_str(), attached_key.as_str(), token)
+        } else if let Some(expected) = &expected_rendezvous {
+            (peer, "", expected.key.as_str(), token)
         } else {
             (peer, "", key, token)
         };
-        let (rendezvous_server, servers, contained) = if other_server.is_empty() {
+        let key = if key.is_empty()
+            && expected_rendezvous
+                .as_ref()
+                .is_some_and(|expected| attached_server.is_none() || expected.fixed_endpoint)
+            && pinned_endpoint.as_deref().is_some_and(is_public_rendezvous_endpoint)
+        {
+            config::RS_PUB_KEY
+        } else {
+            key
+        };
+        let pinned_rendezvous = match pinned_endpoint.as_deref() {
+            Some(endpoint) if endpoint.starts_with("wss://") => Some(PinnedRendezvous::VerifiedWss),
+            Some(endpoint) if is_ws_endpoint(endpoint) => {
+                Some(PinnedRendezvous::AnonymousWebSocket)
+            }
+            Some(endpoint) if hbb_common::webrtc::is_webrtc_endpoint(endpoint) => {
+                Some(PinnedRendezvous::AnonymousWebRtc)
+            }
+            Some(endpoint) if endpoint.contains("://") => bail!("Invalid saved ID server"),
+            Some(_) => Some(PinnedRendezvous::Tcp),
+            None => None,
+        };
+        if let Some(transport) = pinned_rendezvous {
+            let lch = interface.get_lch();
+            let mut lch = lch.write().unwrap();
+            lch.force_relay = lch.policy_relay
+                || matches!(
+                    transport,
+                    PinnedRendezvous::VerifiedWss | PinnedRendezvous::AnonymousWebSocket
+                );
+        }
+        let (rendezvous_server, servers, contained) = if let Some(endpoint) = pinned_endpoint {
+            (endpoint, Vec::new(), true)
+        } else if other_server.is_empty() {
             crate::get_rendezvous_server(1_000).await
         } else {
             if other_server == PUBLIC_SERVER {
@@ -525,7 +989,9 @@ impl Client {
         // WebRTC uses its own ICE sockets and does not depend on the legacy UDP punch socket.
         // When this request carries an offer, `_start_inner` keeps its rendezvous socket solely
         // for trickle signaling; a separate offer-less request owns any TCP punch attempt.
-        let webrtc_offerer = if Self::should_create_webrtc_offerer(&interface) {
+        let webrtc_offerer = if !matches!(pinned_rendezvous, Some(PinnedRendezvous::AnonymousWebSocket))
+            && Self::should_create_webrtc_offerer(&interface)
+        {
             // ICE policy follows relay-by-POLICY, not force_relay: under WebSocket the
             // latter is set for the classic paths, but ICE opens its own sockets and may
             // still go direct - that is the only P2P path ws deployments have.
@@ -553,6 +1019,7 @@ impl Client {
             rendezvous_server.clone(),
             servers.clone(),
             contained,
+            pinned_rendezvous,
         );
         // The fallback request exists only to carry a TCP punch, so it is pointless once TCP
         // punch is off — it would reach `connect()` with nothing to try and just open a second
@@ -581,6 +1048,7 @@ impl Client {
             rendezvous_server,
             servers,
             contained,
+            pinned_rendezvous,
         )
         .boxed();
         if has_webrtc_offerer {
@@ -797,7 +1265,7 @@ impl Client {
     async fn _start_inner(
         peer: String,
         key: String,
-        token: String,
+        mut token: String,
         conn_type: ConnType,
         interface: impl Interface,
         mut udp: (Option<Arc<UdpSocket>>, Option<Arc<Mutex<u16>>>),
@@ -807,6 +1275,7 @@ impl Client {
         mut rendezvous_server: String,
         servers: Vec<String>,
         contained: bool,
+        mut pinned_rendezvous: Option<PinnedRendezvous>,
     ) -> ResultType<(
         (
             Stream,
@@ -815,7 +1284,7 @@ impl Client {
             Option<KcpStream>,
             &'static str,
         ),
-        (i32, String),
+        RendezvousFeedback,
         bool,
     )> {
         // Wrap the offerer so any early return below (?/bail) or cancellation of this future by
@@ -823,7 +1292,32 @@ impl Client {
         // into_inner() once the stream is adopted into a connection attempt.
         let mut webrtc_offerer = webrtc_offerer.map(OffererGuard::new);
         let mut start = Instant::now();
-        let mut socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await;
+        let mut connected_endpoint = rendezvous_server.clone();
+        let mut socket = if let Some(transport) = pinned_rendezvous {
+            match connect_pinned_rendezvous(&rendezvous_server, transport).await {
+                Err(error)
+                    if matches!(transport, PinnedRendezvous::VerifiedWss)
+                        && interface.get_switch_code().is_empty()
+                        && config::allow_insecure_tls_fallback() =>
+                {
+                    hbb_common::throttled_log!(
+                        Duration::from_secs(60),
+                        warn,
+                        "Verified rendezvous connection failed. Retrying the same endpoint without credentials: {}",
+                        error
+                    );
+                    pinned_rendezvous = Some(PinnedRendezvous::AnonymousWebSocket);
+                    connect_pinned_rendezvous(
+                        &rendezvous_server,
+                        PinnedRendezvous::AnonymousWebSocket,
+                    )
+                    .await
+                }
+                result => result,
+            }
+        } else {
+            connect_legacy_rendezvous(&rendezvous_server, &mut connected_endpoint).await
+        };
         debug_assert!(!servers.contains(&rendezvous_server));
         let rtt = start.elapsed();
         log::debug!("TCP connection establishment time used: {:?}", rtt);
@@ -831,7 +1325,7 @@ impl Client {
             log::info!("try the other servers: {:?}", servers);
             for server in servers {
                 let server = check_port(server, RENDEZVOUS_PORT);
-                socket = connect_tcp(&*server, CONNECT_TIMEOUT).await;
+                socket = connect_legacy_rendezvous(&server, &mut connected_endpoint).await;
                 if socket.is_ok() {
                     rendezvous_server = server;
                     break;
@@ -843,6 +1337,13 @@ impl Client {
         }
         log::info!("rendezvous server: {}", rendezvous_server);
         let mut socket = socket?;
+        if matches!(
+            pinned_rendezvous,
+            Some(PinnedRendezvous::AnonymousWebSocket | PinnedRendezvous::AnonymousWebRtc)
+        ) {
+            token.clear();
+            webrtc_offerer = None;
+        }
         let mut my_addr = socket.local_addr();
         let mut signed_id_pk = Vec::new();
         let mut relay_server = "".to_owned();
@@ -859,32 +1360,74 @@ impl Client {
         };
 
         let switch_code = interface.get_switch_code();
-        let legacy_secure = !key.is_empty() && (!token.is_empty() || !switch_code.is_empty());
         let carries_offer = webrtc_offerer.as_ref().and_then(|g| g.stream()).is_some();
+        let pinned_tcp = matches!(pinned_rendezvous, Some(PinnedRendezvous::Tcp));
+        let verified_wss = matches!(pinned_rendezvous, Some(PinnedRendezvous::VerifiedWss));
         // Counted from before the key exchange, so the exchange spends the UDP NAT test's own
         // wait rather than replacing it: the test runs beside both.
         let udp_nat_wait_from = Instant::now();
-        if carries_offer {
+        if carries_offer && !verified_wss {
             // An offer puts both sides' ICE candidates, every interface address of both
             // machines, on this socket, so it goes out only once the server's key exchange has
             // encrypted it. When the server does not complete one, an hbbs from before the
             // exchange, the offer is dropped and this becomes a punch without WebRTC, on a fresh
             // socket since the failed exchange may have consumed a message on this one. Degrade
             // to no WebRTC, never to WebRTC signalling in the clear.
-            match secure_tcp_required(&mut socket, &key).await {
+            let secured = if pinned_tcp {
+                crate::common::key_exchange(&mut socket, &key, true)
+                    .await
+                    .and_then(|authenticated| {
+                        if !authenticated || !socket.is_secured() {
+                            bail!("The rendezvous TCP stream was not authenticated");
+                        }
+                        Ok(())
+                    })
+            } else {
+                secure_tcp_required(&mut socket, &key).await
+            };
+            match secured {
                 Ok(()) => {}
                 Err(err) => {
-                    log::warn!(
-                        "WebRTC signalling to {} cannot be encrypted, punching without WebRTC: {}",
-                        rendezvous_server,
-                        err
-                    );
+                    if pinned_tcp {
+                        hbb_common::throttled_log!(
+                            Duration::from_secs(60),
+                            warn,
+                            "The pinned rendezvous TCP stream could not be authenticated: {}",
+                            err
+                        );
+                        token.clear();
+                    } else {
+                        log::warn!(
+                            "WebRTC signalling to {} cannot be encrypted, punching without WebRTC: {}",
+                            rendezvous_server,
+                            err
+                        );
+                    }
                     webrtc_offerer = None;
-                    socket = connect_tcp(&*rendezvous_server, CONNECT_TIMEOUT).await?;
+                    socket = if let Some(transport) = pinned_rendezvous {
+                        connect_pinned_rendezvous(&rendezvous_server, transport).await?
+                    } else {
+                        connect_legacy_rendezvous(
+                            &rendezvous_server,
+                            &mut connected_endpoint,
+                        )
+                        .await?
+                    };
                     my_addr = socket.local_addr();
                 }
             }
         }
+        if pinned_tcp && !socket.is_secured() {
+            token.clear();
+        }
+        if pinned_rendezvous.is_some()
+            && !switch_code.is_empty()
+            && !verified_wss
+            && !socket.is_secured()
+        {
+            bail!("Switching requires an authenticated rendezvous connection");
+        }
+        let legacy_secure = !key.is_empty() && (!token.is_empty() || !switch_code.is_empty());
         // A token or switch code has always taken this socket straight to the punch without
         // waiting for the UDP NAT test. The WebRTC exchange does not replace that wait, it only
         // spends part of the same budget, so what is left of it is waited out here and a result
@@ -971,6 +1514,20 @@ impl Client {
         let mut webrtc_sdp_answer = String::new();
         let mut pending_webrtc_ice = Vec::<String>::new();
         'punch_attempts: for i in 1..=3 {
+            let pinned = pinned_rendezvous.is_some();
+            if !token.is_empty()
+                && ((pinned && !verified_wss && !socket.is_secured())
+                    || !crate::hbbs_http::account_token_matches(
+                        &token,
+                        &connected_endpoint,
+                        &key,
+                        pinned,
+                    )
+                    .await)
+            {
+                token.clear();
+                msg_out.mut_punch_hole_request().token.clear();
+            }
             log::info!(
                 "#{} {} punch attempt with {}, id: {}",
                 i,
@@ -998,6 +1555,22 @@ impl Client {
                     Some(rendezvous_message::Union::PunchHoleResponse(ph)) => {
                         if ph.socket_addr.is_empty() {
                             if !ph.other_failure.is_empty() {
+                                if ph.other_failure == "Connection failed, please login!"
+                                    && token.is_empty()
+                                    && !verified_wss
+                                    && !socket.is_secured()
+                                    && interface
+                                        .get_lch()
+                                        .read()
+                                        .unwrap()
+                                        .expected_rendezvous
+                                        .is_some()
+                                {
+                                    bail!(
+                                        "{}\nEnter the remote ID in the RustDesk client or connect through a verified WSS server.",
+                                        ph.other_failure
+                                    );
+                                }
                                 bail!(ph.other_failure);
                             }
                             match ph.failure.enum_value() {
@@ -1127,14 +1700,21 @@ impl Client {
                             &key,
                             conn_type,
                             my_addr.is_ipv4(),
+                            pinned_rendezvous
+                                .map(|transport| (rendezvous_server.as_str(), transport)),
                         );
                         connect_futures.push(
                             async move {
                                 let conn = fut.await?;
+                                let over_ws = if pinned_rendezvous.is_some() {
+                                    matches!(&conn, Stream::WebSocket(_))
+                                } else {
+                                    use_ws()
+                                };
                                 Ok((
                                     conn,
                                     None,
-                                    if use_ws() { "WebSocket" } else { "Relay" },
+                                    if over_ws { "WebSocket" } else { "Relay" },
                                     false,
                                 ))
                             }
@@ -1196,6 +1776,7 @@ impl Client {
                             signed_id_pk.clone(),
                             &key,
                             &mut conn,
+                            pinned_rendezvous.is_none(),
                         )
                         .await
                         {
@@ -1215,9 +1796,9 @@ impl Client {
                                     &peer,
                                     relay_server_rr,
                                     &rendezvous_server,
+                                    pinned_rendezvous,
                                     !signed_id_pk.is_empty(),
                                     &key,
-                                    &token,
                                     conn_type,
                                     &interface.get_switch_code(),
                                 )
@@ -1234,10 +1815,16 @@ impl Client {
                                     signed_id_pk,
                                     &key,
                                     &mut relay_conn,
+                                    pinned_rendezvous.is_none(),
                                 )
                                 .await?;
                                 conn = relay_conn;
-                                typ = if use_ws() { "WebSocket" } else { "Relay" };
+                                let over_ws = if pinned_rendezvous.is_some() {
+                                    matches!(&conn, Stream::WebSocket(_))
+                                } else {
+                                    use_ws()
+                                };
+                                typ = if over_ws { "WebSocket" } else { "Relay" };
                                 // The transport is now a relay: the WebRTC win it replaced must
                                 // not carry its direct flag into the return, or the relay is
                                 // reported P2P and the outer race treats it as one.
@@ -1256,7 +1843,13 @@ impl Client {
                         }
                         return Ok((
                             (conn, direct, pk, kcp, typ),
-                            (feedback, rendezvous_server),
+                            RendezvousFeedback {
+                                feedback,
+                                server: connected_endpoint,
+                                token,
+                                key,
+                                pinned_rendezvous,
+                            },
                             false,
                         ));
                     }
@@ -1368,12 +1961,12 @@ impl Client {
                 signed_id_pk,
                 &relay_server,
                 &rendezvous_server,
+                pinned_rendezvous,
                 time_used,
                 peer_nat_type,
                 my_nat_type,
                 is_local,
                 &key,
-                &token,
                 conn_type,
                 interface,
                 udp.0,
@@ -1384,7 +1977,13 @@ impl Client {
                 &punch_type,
             )
             .await?,
-            (feedback, rendezvous_server),
+            RendezvousFeedback {
+                feedback,
+                server: connected_endpoint,
+                token,
+                key,
+                pinned_rendezvous,
+            },
             true,
         ))
     }
@@ -1397,12 +1996,12 @@ impl Client {
         signed_id_pk: Vec<u8>,
         relay_server: &str,
         rendezvous_server: &str,
+        pinned_rendezvous: Option<PinnedRendezvous>,
         punch_time_used: u64,
         peer_nat_type: NatType,
         my_nat_type: i32,
         is_local: bool,
         key: &str,
-        token: &str,
         conn_type: ConnType,
         interface: impl Interface,
         udp_socket_nat: Option<Arc<UdpSocket>>,
@@ -1550,9 +2149,9 @@ impl Client {
                     peer_id,
                     relay_server.to_owned(),
                     rendezvous_server,
+                    pinned_rendezvous,
                     !signed_id_pk.is_empty(),
                     key,
-                    token,
                     conn_type,
                     &switch_code,
                 )
@@ -1562,7 +2161,11 @@ impl Client {
                     interface.update_direct(Some(false));
                     bail!("Failed to connect via relay server: {}", e);
                 }
-                typ = "Relay";
+                typ = if pinned_rendezvous.is_some() && matches!(&conn, Ok(Stream::WebSocket(_))) {
+                    "WebSocket"
+                } else {
+                    "Relay"
+                };
                 direct = false;
             } else {
                 bail!("Failed to make direct connection to remote desktop");
@@ -1574,7 +2177,14 @@ impl Client {
             start.elapsed(),
             punch_type
         );
-        let res = Self::secure_connection(peer_id, signed_id_pk.clone(), key, &mut conn).await;
+        let res = Self::secure_connection(
+            peer_id,
+            signed_id_pk.clone(),
+            key,
+            &mut conn,
+            pinned_rendezvous.is_none(),
+        )
+        .await;
         let pk: Option<Vec<u8>> = match res {
             Ok(pk) => pk,
             Err(e) if typ == "WebRTC" && !relay_server.is_empty() => {
@@ -1587,21 +2197,33 @@ impl Client {
                     peer_id,
                     relay_server.to_owned(),
                     rendezvous_server,
+                    pinned_rendezvous,
                     !signed_id_pk.is_empty(),
                     key,
-                    token,
                     conn_type,
                     &interface.get_switch_code(),
                 )
                 .await
                 {
                     Ok(mut relay_conn) => {
-                        match Self::secure_connection(peer_id, signed_id_pk, key, &mut relay_conn)
-                            .await
+                        match Self::secure_connection(
+                            peer_id,
+                            signed_id_pk,
+                            key,
+                            &mut relay_conn,
+                            pinned_rendezvous.is_none(),
+                        )
+                        .await
                         {
                             Ok(pk) => {
+                                typ = if pinned_rendezvous.is_some()
+                                    && matches!(&relay_conn, Stream::WebSocket(_))
+                                {
+                                    "WebSocket"
+                                } else {
+                                    "Relay"
+                                };
                                 conn = relay_conn;
-                                typ = "Relay";
                                 direct = false;
                                 pk
                             }
@@ -1651,8 +2273,10 @@ impl Client {
         signed_id_pk: Vec<u8>,
         key: &str,
         conn: &mut Stream,
+        use_builtin_key: bool,
     ) -> ResultType<Option<Vec<u8>>> {
-        let rs_pk = get_rs_pk(if key.is_empty() {
+        let require_verified_peer = !use_builtin_key && !key.is_empty();
+        let rs_pk = get_rs_pk(if use_builtin_key && key.is_empty() {
             config::RS_PUB_KEY
         } else {
             key
@@ -1683,6 +2307,7 @@ impl Client {
         }
         let sign_pk = match sign_pk {
             Some(v) => v,
+            None if require_verified_peer => bail!("Key mismatch"),
             None => {
                 // No trusted peer identity (key-less deployment, or a blob that does not verify
                 // under our root), so no fingerprint binding is possible. Fall through like TCP's
@@ -1742,6 +2367,9 @@ impl Client {
                                     },
                                 )?;
                             } else {
+                                if require_verified_peer {
+                                    bail!("Key mismatch");
+                                }
                                 if is_webrtc {
                                     bail!("WebRTC handshake id mismatch (possible MITM)");
                                 }
@@ -1749,6 +2377,9 @@ impl Client {
                                 conn.send(&Message::new()).await?;
                             }
                         } else {
+                            if require_verified_peer {
+                                bail!("Key mismatch");
+                            }
                             if is_webrtc {
                                 bail!("WebRTC peer identity could not be verified (refusing unbound channel)");
                             }
@@ -1759,6 +2390,9 @@ impl Client {
                             conn.send(&msg_out).await?;
                         }
                     } else {
+                        if require_verified_peer {
+                            bail!("Key mismatch");
+                        }
                         if is_webrtc {
                             bail!("WebRTC handshake received an unexpected message type");
                         }
@@ -1766,6 +2400,9 @@ impl Client {
                         conn.send(&Message::new()).await?;
                     }
                 } else {
+                    if require_verified_peer {
+                        bail!("Key mismatch");
+                    }
                     if is_webrtc {
                         bail!("WebRTC handshake received a malformed message");
                     }
@@ -1785,21 +2422,30 @@ impl Client {
         peer: &str,
         relay_server: String,
         rendezvous_server: &str,
+        pinned_rendezvous: Option<PinnedRendezvous>,
         secure: bool,
         key: &str,
-        token: &str,
         conn_type: ConnType,
         switch_code: &str,
     ) -> ResultType<Stream> {
+        if pinned_rendezvous.is_some()
+            && !switch_code.is_empty()
+            && !matches!(pinned_rendezvous, Some(PinnedRendezvous::VerifiedWss))
+        {
+            bail!("Switching requires an authenticated rendezvous connection");
+        }
         let mut succeed = false;
         let mut uuid = "".to_owned();
         let mut ipv4 = true;
 
         for i in 1..=3 {
             // use different socket due to current hbbs implementation requiring different nat address for each attempt
-            let mut socket = connect_tcp(rendezvous_server, CONNECT_TIMEOUT)
-                .await
-                .with_context(|| "Failed to connect to rendezvous server")?;
+            let socket = if let Some(transport) = pinned_rendezvous {
+                connect_pinned_rendezvous(rendezvous_server, transport).await
+            } else {
+                connect_tcp(rendezvous_server, CONNECT_TIMEOUT).await
+            };
+            let mut socket = socket.with_context(|| "Failed to connect to rendezvous server")?;
 
             ipv4 = socket.local_addr().is_ipv4();
             let mut msg_out = RendezvousMessage::new();
@@ -1814,7 +2460,6 @@ impl Client {
             );
             msg_out.set_request_relay(RequestRelay {
                 id: peer.to_owned(),
-                token: token.to_owned(),
                 uuid: uuid.clone(),
                 relay_server: relay_server.clone(),
                 secure,
@@ -1838,7 +2483,16 @@ impl Client {
         if !succeed {
             bail!("Timeout");
         }
-        Self::create_relay(peer, uuid, relay_server, key, conn_type, ipv4).await
+        Self::create_relay(
+            peer,
+            uuid,
+            relay_server,
+            key,
+            conn_type,
+            ipv4,
+            pinned_rendezvous.map(|transport| (rendezvous_server, transport)),
+        )
+        .await
     }
 
     /// Create a relay connection to the server.
@@ -1849,16 +2503,56 @@ impl Client {
         key: &str,
         conn_type: ConnType,
         ipv4: bool,
+        pinned: Option<(&str, PinnedRendezvous)>,
     ) -> ResultType<Stream> {
         crate::common::check_relay_uuid(&uuid)?;
         // The proxy's address family does not constrain the relay target.
         let relay_server = check_port(relay_server, RELAY_PORT);
-        let use_ws_proxy = Config::is_proxy() && is_ws_endpoint(&check_ws(&relay_server));
-        let mut conn = connect_tcp(
-            ipv4_to_ipv6(relay_server, ipv4 || use_ws_proxy),
-            CONNECT_TIMEOUT,
-        )
-        .await
+        let mut conn = match pinned {
+            Some((id_server, transport)) if relay_server.starts_with("wss://") => {
+                let transport = if id_server.starts_with("wss://")
+                    && matches!(transport, PinnedRendezvous::AnonymousWebSocket)
+                {
+                    PinnedRendezvous::AnonymousWebSocket
+                } else {
+                    PinnedRendezvous::VerifiedWss
+                };
+                connect_pinned_rendezvous(&relay_server, transport).await
+            }
+            Some(_) if relay_server.starts_with("ws://") => {
+                connect_pinned_rendezvous(&relay_server, PinnedRendezvous::AnonymousWebSocket).await
+            }
+            Some((_, PinnedRendezvous::Tcp)) if !relay_server.contains("://") => {
+                connect_tcp_local(ipv4_to_ipv6(relay_server, ipv4), None, CONNECT_TIMEOUT).await
+            }
+            Some((
+                id_server,
+                transport @ (PinnedRendezvous::VerifiedWss | PinnedRendezvous::AnonymousWebSocket),
+            )) if !relay_server.contains("://") => {
+                let endpoint = websocket_relay_endpoint(&relay_server, id_server)?;
+                let transport = if endpoint.starts_with("ws://") {
+                    PinnedRendezvous::AnonymousWebSocket
+                } else {
+                    transport
+                };
+                match connect_pinned_rendezvous(&endpoint, transport).await {
+                    Err(_) if !use_ws() => {
+                        // The relay announced a bare address, which may only offer native TCP.
+                        connect_tcp_local(ipv4_to_ipv6(relay_server, ipv4), None, CONNECT_TIMEOUT)
+                            .await
+                    }
+                    result => result,
+                }
+            }
+            _ => {
+                let use_ws_proxy = Config::is_proxy() && is_ws_endpoint(&check_ws(&relay_server));
+                connect_tcp(
+                    ipv4_to_ipv6(relay_server, ipv4 || use_ws_proxy),
+                    CONNECT_TIMEOUT,
+                )
+                .await
+            }
+        }
         .with_context(|| "Failed to connect to relay server")?;
         let mut msg_out = RendezvousMessage::new();
         msg_out.set_request_relay(RequestRelay {
@@ -2816,7 +3510,18 @@ struct ConnToken {
     password: Vec<u8>,
     password_source: PasswordSource,
     session_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scoped_target: Option<(String, ExpectedRendezvous)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confirmed_rendezvous: Option<String>,
+    #[serde(default)]
+    peer_relay: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password_scope: Option<String>,
 }
+
+const PEER_PASSWORD_SCOPE: &str = "saved-password-scope";
+const OS_PASSWORD_SCOPE: &str = "os-password-scope";
 
 /// Login config handler for [`Client`].
 #[derive(Default)]
@@ -2826,6 +3531,7 @@ pub struct LoginConfigHandler {
     pub is_terminal_admin: bool,
     hash: Hash,
     password: Vec<u8>, // remember password for reconnect
+    password_scope: Option<String>,
     pub remember: bool,
     login_method: login_method::LoginMethod,
     config: PeerConfig,
@@ -2865,6 +3571,11 @@ pub struct LoginConfigHandler {
     switch_back_allowed: bool,
     pub save_ab_password_to_recent: bool, // true: connected with ab password
     pub other_server: Option<(String, String, String)>,
+    pub(crate) expected_rendezvous: Option<ExpectedRendezvous>,
+    pub(crate) confirmed_rendezvous: Option<String>,
+    inherited_rendezvous: Option<String>,
+    #[cfg(windows)]
+    pub(crate) recent_connection: Option<crate::ui_session_interface::RecentConnection>,
     pub custom_fps: Arc<Mutex<Option<usize>>>,
     pub adapter_luid: Option<i64>,
     pub mark_unsupported: Vec<CodecFormat>,
@@ -2907,7 +3618,18 @@ impl LoginConfigHandler {
         conn_token: Option<String>,
         login_method: &str,
     ) {
+        let conn_token = conn_token.and_then(|value| serde_json::from_str::<ConnToken>(&value).ok());
         let mut id = id;
+        if let Some((target, expected)) =
+            conn_token.as_ref().and_then(|token| token.scoped_target.as_ref())
+        {
+            id = target.clone();
+            self.expected_rendezvous = Some(expected.clone());
+            self.inherited_rendezvous = conn_token
+                .as_ref()
+                .and_then(|token| token.confirmed_rendezvous.clone());
+            force_relay |= conn_token.as_ref().is_some_and(|token| token.peer_relay);
+        }
         if id.contains("@") {
             let mut v = id.split("@");
             let raw_id: &str = v.next().unwrap_or_default();
@@ -2916,6 +3638,8 @@ impl LoginConfigHandler {
             let args = server_key.next().unwrap_or_default();
             let key = if server == PUBLIC_SERVER {
                 config::RS_PUB_KEY.to_owned()
+            } else if let Some(expected) = &self.expected_rendezvous {
+                expected.key.clone()
             } else {
                 let mut args_map: HashMap<String, &str> = HashMap::new();
                 for arg in args.split('&') {
@@ -2925,8 +3649,7 @@ impl LoginConfigHandler {
                         args_map.insert(k, v);
                     }
                 }
-                let key = args_map.remove("key").unwrap_or_default();
-                key.to_owned()
+                args_map.remove("key").unwrap_or_default().to_owned()
             };
 
             // here we can check <id>/r@server
@@ -2950,19 +3673,16 @@ impl LoginConfigHandler {
         if !login_method.is_empty() && !self.set_login_method(login_method) {
             log::warn!("Failed to initialize login method: {}", login_method);
         }
-        let config = self.load_config();
-        self.remember = !config.password.is_empty();
-        self.config = config;
+        self.config = self.load_config();
 
-        let conn_token = conn_token
-            .map(|x| serde_json::from_str::<ConnToken>(&x).ok())
-            .flatten();
         let mut sid = 0;
         if let Some(token) = conn_token {
             sid = token.session_id;
             self.password = token.password; // use as last password
             self.password_source = token.password_source;
+            self.password_scope = token.password_scope;
         }
+        self.remember = !self.saved_password().is_empty();
         if sid == 0 {
             sid = rand::random();
             if sid == 0 {
@@ -2981,10 +3701,12 @@ impl LoginConfigHandler {
                 || force_relay;
         self.policy_relay = self.peer_relay || Config::is_proxy() || crate::is_udp_disabled();
         self.force_relay = self.policy_relay || use_ws();
-        if let Some((real_id, server, key)) = &self.other_server {
-            let other_server_key = self.get_option("other-server-key");
-            if !other_server_key.is_empty() && key.is_empty() {
-                self.other_server = Some((real_id.to_owned(), server.to_owned(), other_server_key));
+        if self.expected_rendezvous.is_none() {
+            if let Some((real_id, server, key)) = &self.other_server {
+                let other_server_key = self.get_option("other-server-key");
+                if !other_server_key.is_empty() && key.is_empty() {
+                    self.other_server = Some((real_id.to_owned(), server.to_owned(), other_server_key));
+                }
             }
         }
 
@@ -3027,14 +3749,21 @@ impl LoginConfigHandler {
 
     /// Check if the client should auto login.
     /// Return password if the client should auto login, otherwise return empty string.
-    pub fn should_auto_login(&self) -> String {
+    pub fn should_auto_login(&self, scope: Option<&str>) -> String {
         let l = self.lock_after_session_end.v;
         let a = !self.get_option("auto-login").is_empty();
-        let p = self.get_option("os-password");
-        if !p.is_empty() && l && a {
-            p
+        if l && a {
+            self.saved_os_password(scope)
         } else {
             "".to_owned()
+        }
+    }
+
+    fn saved_os_password(&self, scope: Option<&str>) -> String {
+        if scope == self.config.options.get(OS_PASSWORD_SCOPE).map(String::as_str) {
+            self.config.options.get("os-password").cloned().unwrap_or_default()
+        } else {
+            String::new()
         }
     }
 
@@ -3042,6 +3771,27 @@ impl LoginConfigHandler {
     pub fn load_config(&self) -> PeerConfig {
         debug_assert!(self.id.len() > 0);
         PeerConfig::load(&self.id)
+    }
+
+    fn password_scope_matches(&self, config: &PeerConfig) -> bool {
+        self.password_scope.as_deref() == config.options.get(PEER_PASSWORD_SCOPE).map(String::as_str)
+    }
+
+    fn saved_password(&self) -> &[u8] {
+        if self.password_scope_matches(&self.config) {
+            &self.config.password
+        } else {
+            &[]
+        }
+    }
+
+    fn use_password_scope(&mut self, scope: Option<&str>) {
+        if self.password_scope.as_deref() != scope {
+            self.password.clear();
+            self.password_source = Default::default();
+            self.password_scope = scope.map(str::to_owned);
+            self.remember = !self.saved_password().is_empty();
+        }
     }
 
     /// Save a [`PeerConfig`] into the handler.
@@ -3064,6 +3814,17 @@ impl LoginConfigHandler {
         let mut config = self.load_config();
         if v == self.get_option(&k) {
             return;
+        }
+        if k == "os-password" {
+            if v.is_empty() {
+                config.options.remove(OS_PASSWORD_SCOPE);
+            } else if self.peer_info.is_none() {
+                return;
+            } else if let Some(scope) = &self.password_scope {
+                config.options.insert(OS_PASSWORD_SCOPE.to_owned(), scope.clone());
+            } else if !crate::common::is_direct_ip_access(&self.id) {
+                return;
+            }
         }
         config.options.insert(k, v);
         self.save_config(config);
@@ -3602,6 +4363,9 @@ impl LoginConfigHandler {
     }
 
     pub fn get_option(&self, k: &str) -> String {
+        if k == "os-password" {
+            return self.saved_os_password(self.password_scope.as_deref());
+        }
         if let Some(v) = self.config.options.get(k) {
             v.clone()
         } else {
@@ -3654,7 +4418,7 @@ impl LoginConfigHandler {
     ///
     /// * `username` - The name of the peer.
     /// * `pi` - The peer info.
-    pub fn handle_peer_info(&mut self, pi: &PeerInfo) {
+    pub fn handle_peer_info(&mut self, pi: &PeerInfo, trust: &crate::trusted_devices::client::Session) {
         if !pi.version.is_empty() {
             self.version = hbb_common::get_version_number(&pi.version);
         }
@@ -3666,32 +4430,31 @@ impl LoginConfigHandler {
         };
         let mut config = self.load_config();
         config.info = serde;
-        let password = self.password.clone();
-        let password0 = config.password.clone();
-        let remember = self.remember;
+        let password = &self.password;
         let hash = self.hash.clone();
-        if remember && !self.skips_saved_password() {
-            // remember is true: use PeerConfig password or ui login
-            // not sync shared password to recent
-            if !password.is_empty()
-                && password != password0
-                && !self.password_source.is_shared_ab(&password, &hash)
+        let candidate: [u8; 32] = Sha256::digest(password).into();
+        let accepted_password = !password.is_empty()
+            && self.password_scope == trust.password_scope
+            && trust.password_attempt == Some(candidate)
+            && !self.skips_saved_password();
+        if accepted_password {
+            if (self.remember && !self.password_source.is_shared_ab(password, &hash))
+                || (!self.remember && self.password_source.is_personal_ab(password))
             {
-                config.password = password.clone();
-                log::debug!("remember password of {}", self.id);
-            }
-        } else if !self.skips_saved_password() {
-            if self.password_source.is_personal_ab(&password) {
-                // sync personal ab password to recent automatically
-                config.password = password.clone();
-                log::debug!("save ab password of {} to recent", self.id);
-            } else if !password0.is_empty() {
-                config.password = Default::default();
-                log::debug!("remove password of {}", self.id);
+                config.password.clone_from(password);
+                if let Some(scope) = &self.password_scope {
+                    config.options.insert(PEER_PASSWORD_SCOPE.to_owned(), scope.clone());
+                } else {
+                    config.options.remove(PEER_PASSWORD_SCOPE);
+                }
+            } else if !self.remember && self.password_scope_matches(&config) {
+                config.password.clear();
             }
         }
         if let Some((_, b, c)) = self.other_server.as_ref() {
-            if b != PUBLIC_SERVER {
+            if b != PUBLIC_SERVER
+                && (self.expected_rendezvous.is_none() || get_rs_pk(c).is_some())
+            {
                 config
                     .options
                     .insert("other-server-key".to_owned(), c.clone());
@@ -3707,10 +4470,11 @@ impl LoginConfigHandler {
         #[cfg(feature = "flutter")]
         {
             // sync connected password to personal ab automatically if it is not shared password
-            if !self.skips_saved_password()
+            if accepted_password
+                && self.password_scope_matches(&config)
                 && !config.password.is_empty()
-                && !self.password_source.is_shared_ab(&password, &hash)
-                && !self.password_source.is_personal_ab(&password)
+                && !self.password_source.is_shared_ab(password, &hash)
+                && !self.password_source.is_personal_ab(password)
             {
                 let hash = base64::encode(config.password.clone(), base64::Variant::Original);
                 let evt: HashMap<&str, String> = HashMap::from([
@@ -3938,14 +4702,27 @@ impl LoginConfigHandler {
             .unwrap_or(false)
     }
 
-    pub fn get_conn_token(&self) -> Option<String> {
-        if self.password.is_empty() {
+    pub fn get_conn_token(&self, connected: bool) -> Option<String> {
+        let has_password = !self.password.is_empty();
+        if !has_password && self.expected_rendezvous.is_none() {
             return None;
         }
         serde_json::to_string(&ConnToken {
             password: self.password.clone(),
-            password_source: self.password_source.clone(),
-            session_id: self.session_id,
+            password_source: if has_password {
+                self.password_source.clone()
+            } else {
+                PasswordSource::default()
+            },
+            session_id: if has_password { self.session_id } else { 0 },
+            scoped_target: self.expected_rendezvous.clone().map(|expected| (self.id.clone(), expected)),
+            confirmed_rendezvous: if connected && self.peer_info.is_some() && self.other_server.is_none() {
+                self.confirmed_rendezvous.clone()
+            } else {
+                None
+            },
+            peer_relay: self.expected_rendezvous.is_some() && self.peer_relay,
+            password_scope: self.password_scope.clone(),
         })
         .ok()
     }
@@ -4643,7 +5420,12 @@ pub async fn handle_hash(
     trust: &mut crate::trusted_devices::client::Session,
     peer: &mut Stream,
 ) -> bool {
-    lc.write().unwrap().hash = hash.clone();
+    trust.password_attempt = None;
+    {
+        let mut login = lc.write().unwrap();
+        login.use_password_scope(trust.password_scope.as_deref());
+        login.hash = hash.clone();
+    }
     // Take care of password application order
 
     // switch_uuid
@@ -4712,7 +5494,7 @@ pub async fn handle_hash(
     }
     // peer config password
     if password.is_empty() {
-        password = lc.read().unwrap().config.password.clone();
+        password = lc.read().unwrap().saved_password().to_vec();
         if !password.is_empty() {
             lc.write().unwrap().password_source = Default::default();
         }
@@ -4759,6 +5541,7 @@ pub async fn handle_hash(
         }
         Vec::new()
     } else {
+        trust.password_attempt = Some(Sha256::digest(&password).into());
         let mut hasher = Sha256::new();
         hasher.update(&password);
         hasher.update(&hash.challenge);
@@ -4793,6 +5576,16 @@ pub async fn handle_hash(
 
 #[inline]
 fn try_get_password_from_personal_ab(lc: Arc<RwLock<LoginConfigHandler>>, password: &mut Vec<u8>) {
+    {
+        let login = lc.read().unwrap();
+        let unsaved_default_peer = login.other_server.is_none()
+            && login.expected_rendezvous.is_none()
+            && login.config.password.is_empty()
+            && !login.config.options.contains_key(PEER_PASSWORD_SCOPE);
+        if !login.password_scope_matches(&login.config) && !unsaved_default_peer {
+            return;
+        }
+    }
     let access_token = LocalConfig::get_option("access_token");
     let ab = config::Ab::load();
     if !access_token.is_empty() && access_token == ab.access_token {
@@ -4837,6 +5630,9 @@ async fn send_login(
         .read()
         .unwrap()
         .create_login_msg(os_username, os_password, password);
+    if msg_out.login_request().password.is_empty() {
+        trust.password_attempt = None;
+    }
     let msg_out = trust.login(msg_out).await?;
     peer.send(&msg_out).await
 }
@@ -4860,10 +5656,11 @@ pub async fn handle_login_from_ui(
     trust: &mut crate::trusted_devices::client::Session,
     peer: &mut Stream,
 ) -> ResultType<()> {
+    lc.write().unwrap().use_password_scope(trust.password_scope.as_deref());
     let mut hash_password = if password.is_empty() {
         let mut password2 = lc.read().unwrap().password.clone();
         if password2.is_empty() {
-            password2 = lc.read().unwrap().config.password.clone();
+            password2 = lc.read().unwrap().saved_password().to_vec();
             if !password2.is_empty() {
                 lc.write().unwrap().password_source = Default::default();
             }
@@ -4878,6 +5675,8 @@ pub async fn handle_login_from_ui(
         lc.write().unwrap().remember = remember;
         res[..].into()
     };
+    trust.password_attempt =
+        (!hash_password.is_empty()).then(|| Sha256::digest(&hash_password).into());
     lc.write().unwrap().password = hash_password.clone();
     let mut hasher2 = Sha256::new();
     hasher2.update(&hash_password[..]);
@@ -4922,7 +5721,7 @@ pub trait Interface: Send + Clone + 'static + Sized {
     fn send(&self, data: Data);
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str);
     fn handle_login_error(&self, err: &str) -> bool;
-    fn handle_peer_info(&self, pi: PeerInfo);
+    fn handle_peer_info(&self, pi: PeerInfo, trust: &crate::trusted_devices::client::Session);
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
     fn on_error(&self, err: &str) {
         self.msgbox("error", "Error", err, "");
@@ -5253,18 +6052,51 @@ mod retry_tests {
     }
 }
 
+#[cfg(test)]
+mod rendezvous_endpoint_tests {
+    use super::{check_port, same_rendezvous_endpoint, RENDEZVOUS_PORT};
+
+    #[test]
+    fn rendezvous_endpoint_matches_the_default_port_and_dns_case() {
+        let default = check_port("Desk.Example", RENDEZVOUS_PORT);
+        assert!(same_rendezvous_endpoint(&default, "desk.example:21116"));
+        assert!(!same_rendezvous_endpoint(&default, "desk.example:21117"));
+        assert!(!same_rendezvous_endpoint(&default, "other.example:21116"));
+        assert!(!same_rendezvous_endpoint("", ""));
+    }
+
+    #[test]
+    fn rendezvous_endpoint_preserves_the_transport_and_path() {
+        let endpoint = "wss://desk.example/ws/id";
+        assert!(same_rendezvous_endpoint("wss://Desk.Example", "wss://desk.example:443/"));
+        assert!(same_rendezvous_endpoint(endpoint, endpoint));
+        assert!(same_rendezvous_endpoint(endpoint, "wss://Desk.Example:443/ws/id"));
+        assert!(!same_rendezvous_endpoint(endpoint, "ws://desk.example/ws/id"));
+        assert!(!same_rendezvous_endpoint(endpoint, "wss://desk.example/ws/ID"));
+        assert!(!same_rendezvous_endpoint(endpoint, "wss://desk.example/ws/./id"));
+        assert!(!same_rendezvous_endpoint(endpoint, "wss://desk.example:8443/ws/id"));
+        assert!(!same_rendezvous_endpoint(endpoint, "wss://desk.example/ws/id?other=true"));
+        assert!(!same_rendezvous_endpoint(endpoint, "desk.example"));
+    }
+}
+
 pub async fn hc_connection(
-    feedback: i32,
-    rendezvous_server: String,
-    token: &str,
+    rendezvous: RendezvousFeedback,
 ) -> Option<tokio::sync::mpsc::UnboundedSender<()>> {
+    let RendezvousFeedback {
+        feedback,
+        server: rendezvous_server,
+        token,
+        key,
+        pinned_rendezvous,
+        ..
+    } = rendezvous;
     if feedback == 0 || rendezvous_server.is_empty() || token.is_empty() {
         return None;
     }
     let (tx, rx) = unbounded_channel::<()>();
-    let token = token.to_owned();
     tokio::spawn(async move {
-        allow_err!(hc_connection_(rendezvous_server, rx, token).await);
+        allow_err!(hc_connection_(rendezvous_server, rx, token, key, pinned_rendezvous).await);
     });
     Some(tx)
 }
@@ -5273,15 +6105,38 @@ async fn hc_connection_(
     rendezvous_server: String,
     mut rx: UnboundedReceiver<()>,
     token: String,
+    key: String,
+    pinned_rendezvous: Option<PinnedRendezvous>,
 ) -> ResultType<()> {
     let mut timer = crate::rustdesk_interval(interval(crate::TIMER_OUT));
     let mut last_recv_msg = Instant::now();
     let mut keep_alive = crate::DEFAULT_KEEP_ALIVE;
 
     let host = check_port(&rendezvous_server, RENDEZVOUS_PORT);
-    let mut conn = connect_tcp(host.clone(), CONNECT_TIMEOUT).await?;
-    let key = crate::get_key(true).await;
-    crate::secure_tcp(&mut conn, &key).await?;
+    let verified_wss = matches!(pinned_rendezvous, Some(PinnedRendezvous::VerifiedWss));
+    let mut conn = if let Some(transport) = pinned_rendezvous {
+        let mut conn = connect_pinned_rendezvous(&host, transport).await?;
+        if matches!(transport, PinnedRendezvous::Tcp)
+            && !crate::common::key_exchange(&mut conn, &key, true).await?
+        {
+            return Ok(());
+        }
+        conn
+    } else {
+        let mut conn = if host.contains("://") {
+            connect_tcp(host, CONNECT_TIMEOUT).await?
+        } else {
+            connect_tcp_local(host, None, CONNECT_TIMEOUT).await?
+        };
+        crate::secure_tcp(&mut conn, &key).await?;
+        conn
+    };
+    let pinned = pinned_rendezvous.is_some();
+    if (pinned && !verified_wss && !conn.is_secured())
+        || !crate::hbbs_http::account_token_matches(&token, &rendezvous_server, &key, pinned).await
+    {
+        return Ok(());
+    }
     let mut msg_out = RendezvousMessage::new();
     msg_out.set_hc(HealthCheck {
         token,
@@ -5894,10 +6749,15 @@ mod kx_tests {
         let (rs_pk, rs_sk) = sign::gen_keypair();
         let (host, signed_id_pk, seen) = controlled_stub(advertised, run, rs_sk).await;
         let mut conn = connect_tcp(host, 3000).await.unwrap();
-        let pk =
-            Client::secure_connection(PEER_ID, signed_id_pk, &crate::encode64(rs_pk.0), &mut conn)
-                .await
-                .unwrap();
+        let pk = Client::secure_connection(
+            PEER_ID,
+            signed_id_pk,
+            &crate::encode64(rs_pk.0),
+            &mut conn,
+            false,
+        )
+        .await
+        .unwrap();
         assert!(pk.is_some() && conn.is_secured());
         conn.send(&test_delay(1)).await.unwrap();
         let decrypted = matches!(conn.next().await, Some(Ok(b)) if delay_in(&b) == Some(2));

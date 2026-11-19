@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:js' as js;
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 import 'dart:html' as html;
@@ -93,6 +94,10 @@ class CursorShape {
 }
 
 class RustdeskImpl {
+  String? _pendingAccountAuthApi;
+  String? _pendingAccountAuthPriorToken;
+  int _pendingAccountAuthAttempt = 0;
+
   // The core answers through the callback, before callMethod returns.
   Future<CursorShape?> sessionGetCursorShape(
       {required UuidValue sessionId, required String id, dynamic hint}) {
@@ -150,6 +155,7 @@ class RustdeskImpl {
       required bool isSharedPassword,
       String? connToken,
       required String loginMethod,
+      String? expectedRendezvous,
       dynamic hint}) {
     return js.context.callMethod('setByName', [
       'session_add_sync',
@@ -950,7 +956,7 @@ class RustdeskImpl {
     return Future(() => false);
   }
 
-  Future<void> mainHttpRequest({
+  Stream<String> mainHttpRequest({
     required String url,
     required String method,
     String? body,
@@ -958,10 +964,6 @@ class RustdeskImpl {
     dynamic hint,
   }) {
     throw UnimplementedError("mainHttpRequest");
-  }
-
-  Future<String?> mainGetHttpStatus({required String url, dynamic hint}) {
-    throw UnimplementedError("mainGetHttpStatus");
   }
 
   String mainGetLocalOption({required String key, dynamic hint}) {
@@ -987,11 +989,60 @@ class RustdeskImpl {
   }
 
   Future<void> mainSetLocalOption(
-      {required String key, required String value, dynamic hint}) {
-    return Future(() => js.context.callMethod('setByName', [
-          'option:local',
-          jsonEncode({'name': key, 'value': value})
-        ]));
+      {required String key,
+      required String value,
+      String? loginDeployment,
+      dynamic hint}) async {
+    js.context.callMethod('setByName', [
+      'option:local',
+      jsonEncode({'name': key, 'value': value})
+    ]);
+    if (key == 'access_token') {
+      js.context.callMethod('setByName', [
+        'option:local',
+        jsonEncode({
+          'name': 'access_token_deployment',
+          'value': value.isEmpty || loginDeployment == null
+              ? ''
+              : _accountTokenBinding(loginDeployment, value),
+        })
+      ]);
+    }
+  }
+
+  String _accountTokenBinding(String deployment, String token) =>
+      sha256.convert(utf8.encode(jsonEncode([deployment, token]))).toString();
+
+  Future<List<String>> mainAccountLoginContext({dynamic hint}) async {
+    final api = await mainGetApiServer();
+    return [api, api];
+  }
+
+  Future<List<String>> mainAccountRequestContext({dynamic hint}) async {
+    final api = await mainGetApiServer();
+    final token = mainGetLocalOption(key: 'access_token');
+    final deployment = mainGetLocalOption(key: 'access_token_deployment');
+    return [
+      api,
+      token.isNotEmpty && deployment == _accountTokenBinding(api, token)
+          ? token
+          : ''
+    ];
+  }
+
+  Future<bool> mainAccountServerIdentityChanged(
+      {required String api,
+      required String id,
+      required String key,
+      dynamic hint}) async {
+    final preview = jsonDecode(
+        mainGetCommonSync(key: 'resolve-api-server:${jsonEncode([api, id])}'));
+    if (preview['error'] != null) {
+      throw FormatException(
+          'Failed to resolve API server: ${preview['error']}');
+    }
+    final current = await mainAccountLoginContext();
+    return current[0] != preview['url'];
   }
 
   // Tell the JS-side matcher (flutter/web/js/src/shortcut_matcher.ts) to
@@ -1179,6 +1230,14 @@ class RustdeskImpl {
     }
     return Future.value(newId);
   }
+
+  Future<List<String>> mainResolveUriTarget(
+          {required String target,
+          required String key,
+          required bool preferCurrent,
+          String? recentEndpoint,
+          dynamic hint}) async =>
+      [target];
 
   String mainGetMainDisplay({dynamic hint}) {
     return js.context.callMethod('getByName', ['main_display']);
@@ -1642,20 +1701,84 @@ class RustdeskImpl {
     // Safari only allows auth popups while handling the original user gesture.
     // Use Future.sync so the JS call runs synchronously (pre-opening the OIDC
     // window) while any interop error still surfaces as a Future error.
-    return Future.sync(() => js.context.callMethod('setByName', [
-          'account_auth',
-          jsonEncode({'op': op, 'remember': rememberMe})
-        ]));
+    return Future.sync(() {
+      _pendingAccountAuthAttempt++;
+      _pendingAccountAuthApi =
+          js.context.callMethod('getByName', ['api_server']);
+      _pendingAccountAuthPriorToken = mainGetLocalOption(key: 'access_token');
+      js.context.callMethod('setByName', [
+        'account_auth',
+        jsonEncode({'op': op, 'remember': rememberMe})
+      ]);
+    });
   }
 
-  Future<void> mainAccountAuthCancel({dynamic hint}) {
-    return Future(
-        () => js.context.callMethod('setByName', ['account_auth_cancel']));
+  Future<String> mainAccountAuthCancel({dynamic hint}) {
+    final token = mainGetLocalOption(key: 'access_token');
+    _pendingAccountAuthAttempt++;
+    _pendingAccountAuthApi = null;
+    _pendingAccountAuthPriorToken = null;
+    return Future(() {
+      js.context.callMethod('setByName', ['account_auth_cancel']);
+      return token;
+    });
   }
 
-  Future<String> mainAccountAuthResult({dynamic hint}) {
-    return Future(
-        () => js.context.callMethod('getByName', ['account_auth_result']));
+  Future<String> mainAccountAuthResult({dynamic hint}) async {
+    final attempt = _pendingAccountAuthAttempt;
+    final pendingApi = _pendingAccountAuthApi;
+    final priorToken = _pendingAccountAuthPriorToken;
+    final result =
+        js.context.callMethod('getByName', ['account_auth_result']) as String;
+    if (result.isEmpty) return result;
+    final data = jsonDecode(result);
+    if (data is! Map<String, dynamic>) return result;
+    final authBody = data['auth_body'];
+    if (authBody == null) return result;
+    final token = authBody is Map ? authBody['access_token'] : null;
+    final currentToken = mainGetLocalOption(key: 'access_token');
+    final sameDeployment = pendingApi != null &&
+        pendingApi == js.context.callMethod('getByName', ['api_server']) &&
+        attempt == _pendingAccountAuthAttempt;
+    var accepted = false;
+    if (sameDeployment && authBody is Map) {
+      final user = authBody['user'];
+      final tfaType = authBody['tfa_type'];
+      if (authBody['type'] == 'email_check' &&
+          (token == null || token == '') &&
+          authBody['secret'] is String &&
+          user is Map &&
+          user['name'] is String &&
+          (user['name'] as String).isNotEmpty &&
+          (tfaType == null ||
+              tfaType == 'email_check' ||
+              tfaType == 'tfa_check') &&
+          currentToken == priorToken) {
+        accepted = true;
+      } else if (authBody['type'] == 'access_token' &&
+          token is String &&
+          token.isNotEmpty &&
+          token != priorToken &&
+          token == currentToken) {
+        await mainSetLocalOption(
+            key: 'access_token', value: token, loginDeployment: pendingApi);
+        final [currentApi, boundToken] = await mainAccountRequestContext();
+        accepted = attempt == _pendingAccountAuthAttempt &&
+            currentApi == pendingApi &&
+            boundToken == token;
+      }
+    }
+    if (attempt == _pendingAccountAuthAttempt) {
+      _pendingAccountAuthApi = null;
+      _pendingAccountAuthPriorToken = null;
+    }
+    return accepted
+        ? result
+        : jsonEncode({
+            ...data,
+            'auth_body': null,
+            'failed_msg': 'Account session changed. Please try again',
+          });
   }
 
   Future<void> mainOnMainWindowClose({dynamic hint}) {
@@ -1936,8 +2059,8 @@ class RustdeskImpl {
   String mainGetCommonSync({required String key, dynamic hint}) {
     const prefix = 'resolve-api-server:';
     if (key.startsWith(prefix)) {
-      return js.context
-          .callMethod('getByName', ['api_server', key.substring(prefix.length)]);
+      return js.context.callMethod(
+          'getByName', ['api_server', key.substring(prefix.length)]);
     }
     throw UnimplementedError("mainGetCommonSync");
   }
@@ -1953,12 +2076,15 @@ class RustdeskImpl {
   }
 
   Future<void> sessionSetCommon(
-      {required UuidValue sessionId, required String key, required String value, dynamic hint}) {
-      js.context.callMethod('setByName', [
-        'common',
-        jsonEncode({'name': key, 'value': value})
-      ]);
-      return Future.value();
+      {required UuidValue sessionId,
+      required String key,
+      required String value,
+      dynamic hint}) {
+    js.context.callMethod('setByName', [
+      'common',
+      jsonEncode({'name': key, 'value': value})
+    ]);
+    return Future.value();
   }
 
   String? sessionGetCommonSync(

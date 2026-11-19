@@ -131,7 +131,10 @@ pub fn peer_get_sessions_count(id: String, conn_type: i32) -> SyncReturn<usize> 
     } else {
         ConnType::DEFAULT_CONN
     };
-    SyncReturn(sessions::get_session_count(id, conn_type))
+    SyncReturn(sessions::get_session_count(
+        sessions::existing_peer_identity(&id),
+        conn_type,
+    ))
 }
 
 pub fn session_add_existed_sync(
@@ -161,6 +164,7 @@ pub fn session_add_sync(
     is_shared_password: bool,
     conn_token: Option<String>,
     login_method: String,
+    expected_rendezvous: Option<String>,
 ) -> SyncReturn<String> {
     let add_res = session_add(
         &session_id,
@@ -176,6 +180,7 @@ pub fn session_add_sync(
         is_shared_password,
         conn_token,
         &login_method,
+        expected_rendezvous,
     );
     // We can't put the remove call together with `std::env::var("IS_TERMINAL_ADMIN")`.
     // Because there are some `bail!` in `session_add()`, we must make sure `IS_TERMINAL_ADMIN` is removed at last.
@@ -1005,10 +1010,6 @@ pub fn main_get_async_status() -> String {
     get_async_job_status()
 }
 
-pub fn main_get_http_status(url: String) -> Option<String> {
-    get_async_http_status(url)
-}
-
 pub fn main_get_option(key: String) -> String {
     get_option(key)
 }
@@ -1208,7 +1209,21 @@ pub fn main_discover() {
 }
 
 pub fn main_get_api_server() -> String {
-    get_api_server()
+    crate::hbbs_http::account_api_server()
+}
+
+pub fn main_account_login_context() -> Vec<String> {
+    let (api, deployment) = crate::hbbs_http::account_login_context();
+    vec![api, deployment]
+}
+
+pub fn main_account_request_context() -> Vec<String> {
+    let (api, token) = crate::hbbs_http::account_request_context();
+    vec![api, token]
+}
+
+pub fn main_account_server_identity_changed(api: String, id: String, key: String) -> bool {
+    crate::hbbs_http::account_server_identity_changed(api, id, key)
 }
 
 pub fn main_deploy_device(token: String, id: String) -> String {
@@ -1231,8 +1246,76 @@ pub fn main_resolve_avatar_url(avatar: String) -> SyncReturn<String> {
     SyncReturn(resolve_avatar_url(avatar))
 }
 
-pub fn main_http_request(url: String, method: String, body: Option<String>, header: String) {
-    http_request(url, method, body, header)
+pub fn main_http_request(
+    response: StreamSink<String>,
+    url: String,
+    method: String,
+    body: Option<String>,
+    header: String,
+) {
+    std::thread::spawn(move || {
+        let text = match crate::http_request_sync(url, method, body, header) {
+            Ok(text) => text,
+            Err(error) => serde_json::json!({
+                "transport_error": http_transport_error(&error)
+            })
+            .to_string(),
+        };
+        response.add(text);
+        response.close();
+    });
+}
+
+fn http_transport_error(error: &hbb_common::anyhow::Error) -> &'static str {
+    use std::io::ErrorKind;
+
+    let mut fallback = "The HTTP request failed";
+    for cause in error.chain() {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            if error.is_timeout() {
+                return "The HTTP request timed out";
+            }
+            if error.is_connect() {
+                fallback = "Could not connect to the HTTP server";
+            }
+            continue;
+        }
+        if cause.is::<hbb_common::tokio::time::error::Elapsed>() {
+            return "The HTTP request timed out";
+        }
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            match error.kind() {
+                ErrorKind::TimedOut => return "The HTTP request timed out",
+                ErrorKind::ConnectionRefused => return "The HTTP connection was refused",
+                ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe => {
+                    return "The HTTP connection was interrupted";
+                }
+                _ => {}
+            }
+        }
+        // Use the cause only to identify the failure. It may contain a URL or server text.
+        let message = cause.to_string().to_ascii_lowercase();
+        if message.contains("dns error")
+            || message.contains("failed to lookup address")
+            || message.contains("could not resolve")
+            || message.contains("name or service not known")
+        {
+            return "Could not resolve the HTTP server address";
+        }
+        if message.contains("tls handshake")
+            || message.contains("certificate")
+            || message.contains("ssl routines")
+            || message.contains("handshakefailure")
+        {
+            return "Could not establish a secure TLS connection to the HTTP server";
+        }
+        if message.contains("connection closed without response")
+            || message.contains("connection reset")
+        {
+            return "The HTTP connection was interrupted";
+        }
+    }
+    fallback
 }
 
 pub fn main_get_local_option(key: String) -> SyncReturn<String> {
@@ -1276,7 +1359,11 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
     SyncReturn(())
 }
 
-pub fn main_set_local_option(key: String, value: String) {
+pub fn main_set_local_option(key: String, value: String, login_deployment: Option<String>) {
+    if key == "access_token" {
+        crate::hbbs_http::store_account_token(value, login_deployment.as_deref().unwrap_or(""));
+        return;
+    }
     let is_texture_render_key = key.eq(keys::OPTION_TEXTURE_RENDER);
     let is_d3d_render_key = key.eq(keys::OPTION_ALLOW_D3D_RENDER);
     set_local_option(key, value.clone());
@@ -1670,6 +1757,84 @@ pub fn main_get_user_default_option(key: String) -> SyncReturn<String> {
 
 pub fn main_handle_relay_id(id: String) -> String {
     handle_relay_id(&id).to_owned()
+}
+
+pub fn main_resolve_uri_target(
+    target: String,
+    key: String,
+    prefer_current: bool,
+    recent_endpoint: Option<String>,
+) -> Vec<String> {
+    let Some((peer, server)) = target.split_once('@') else {
+        if crate::client::is_uri_direct_access(handle_relay_id(&target)) {
+            return Vec::new();
+        }
+        return flutter::async_tasks::resolve_link_route(crate::client::current_link_rendezvous())
+            .flatten()
+            .map_or_else(Vec::new, |(_, endpoint, key)| vec![target, endpoint, key]);
+    };
+    if !crate::client::valid_uri_rendezvous(server) {
+        return Vec::new();
+    }
+    #[cfg(windows)]
+    let recent = if let Some(endpoint) = recent_endpoint {
+        use crate::ui_session_interface::RecentConnection;
+        let requested = RecentConnection {
+            target: target.clone(),
+            key: key.clone(),
+            prefer_current,
+            endpoint,
+        };
+        if !requested.is_persisted() {
+            return Vec::new();
+        }
+        Some(requested)
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let restore_recent_identity = recent.is_some();
+    #[cfg(not(windows))]
+    let restore_recent_identity = {
+        let _ = recent_endpoint;
+        false
+    };
+    let endpoint = if prefer_current {
+        let (peer, server, expected_key) = (peer.to_owned(), server.to_owned(), key.clone());
+        flutter::async_tasks::resolve_link_route(async move {
+            crate::client::current_expected_rendezvous(
+                &peer,
+                &server,
+                &expected_key,
+                restore_recent_identity,
+            )
+            .await
+        })
+        .flatten()
+    } else {
+        None
+    };
+    let resolved_peer = endpoint
+        .as_ref()
+        .is_some_and(|endpoint| restore_recent_identity || !endpoint.contains("://"))
+        .then(|| peer.to_owned());
+    #[cfg(windows)]
+    if let Some(recent) = recent {
+        let window_target = recent.window_target();
+        let endpoint = endpoint.unwrap_or_else(|| {
+            if recent.endpoint.is_empty() {
+                server.to_owned()
+            } else {
+                recent.endpoint
+            }
+        });
+        return vec![resolved_peer.unwrap_or(target), endpoint, key, window_target];
+    }
+    let id = resolved_peer.unwrap_or(target);
+    match endpoint {
+        Some(endpoint) => vec![id, endpoint],
+        None => vec![id],
+    }
 }
 
 pub fn main_is_option_fixed(key: String) -> SyncReturn<bool> {
@@ -2480,12 +2645,10 @@ pub fn install_install_options() -> SyncReturn<String> {
 }
 
 pub fn main_account_auth(op: String, remember_me: bool) {
-    let id = get_id();
-    let uuid = get_uuid();
-    account_auth(op, id, uuid, remember_me);
+    account_auth(op, remember_me);
 }
 
-pub fn main_account_auth_cancel() {
+pub fn main_account_auth_cancel() -> String {
     account_auth_cancel()
 }
 
@@ -3053,8 +3216,40 @@ pub fn session_get_common(
     #[allow(unused_variables)] param: String,
 ) -> Option<String> {
     if let Some(s) = sessions::get_session_by_session_id(&session_id) {
+        if matches!(key.as_str(), "fixed_route_ready" | "matches_recent_route") {
+            let round = s.connection_round_state.lock().unwrap();
+            let login = s.lc.read().unwrap();
+            if !round.is_connected()
+                || !login.peer_info.as_ref().is_some_and(|peer| !peer.displays.is_empty())
+            {
+                return None;
+            }
+            let endpoint = login.confirmed_rendezvous.as_deref()?;
+            let configured_key = &login.expected_rendezvous.as_ref()?.key;
+            #[cfg(windows)]
+            if key == "matches_recent_route" {
+                let (target, route): (String, String) = serde_json::from_str(&param).ok()?;
+                let expected: crate::client::ExpectedRendezvous =
+                    serde_json::from_str(&route).ok()?;
+                let peer = target.split_once('@').map_or(target.as_str(), |(peer, _)| peer);
+                let force_relay = peer != crate::ui_interface::handle_relay_id(peer);
+                return (sessions::existing_peer_identity(&target) == login.get_id()
+                    && force_relay == login.peer_relay
+                    && (!force_relay || login.direct == Some(false))
+                    && expected.matches_endpoint(endpoint, configured_key))
+                    .then(|| "true".to_owned());
+            }
+            let (route, force_relay): (String, bool) = serde_json::from_str(&param).ok()?;
+            let expected: crate::client::ExpectedRendezvous = serde_json::from_str(&route).ok()?;
+            return (key == "fixed_route_ready"
+                && (!force_relay || (login.peer_relay && login.direct == Some(false)))
+                && expected.matches_endpoint(endpoint, configured_key))
+                .then(|| "true".to_owned());
+        }
         let v = if key == "is_screenshot_supported" {
             s.is_screenshot_supported().to_string()
+        } else if key == "has_fixed_route" {
+            s.lc.read().unwrap().expected_rendezvous.is_some().to_string()
         } else if key == "login_method" {
             s.lc.read().unwrap().get_login_method().to_owned()
         } else {

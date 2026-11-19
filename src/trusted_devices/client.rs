@@ -13,6 +13,8 @@ use std::convert::TryInto;
 #[derive(Default)]
 pub struct Session {
     credentials: Option<Credentials>,
+    pub(crate) password_scope: Option<String>,
+    pub(crate) password_attempt: Option<[u8; 32]>,
     supported: bool,
     requested: bool,
     legacy: bool,

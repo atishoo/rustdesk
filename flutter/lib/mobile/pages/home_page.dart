@@ -173,7 +173,7 @@ class WebHomePage extends StatelessWidget {
     );
   }
 
-  handleUnilink(BuildContext context) {
+  handleUnilink(BuildContext context) async {
     if (webInitialLink.isEmpty) {
       return;
     }
@@ -199,7 +199,7 @@ class WebHomePage extends StatelessWidget {
     if (uri == null) {
       return;
     }
-    final args = urlLinkToCmdArgs(uri);
+    final args = await urlLinkToCmdArgs(uri);
     if (args == null || args.isEmpty) {
       return;
     }

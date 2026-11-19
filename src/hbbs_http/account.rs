@@ -147,14 +147,13 @@ impl OidcSession {
     }
 
     fn ensure_client(api_server: &str) {
-        let mut write_guard = OIDC_SESSION.write().unwrap();
-        if write_guard.warmed_api_server.as_deref() == Some(api_server) {
+        if OIDC_SESSION.read().unwrap().warmed_api_server.as_deref() == Some(api_server) {
             return;
         }
         // This URL is used to detect the appropriate TLS implementation for the server.
         let login_option_url = format!("{}/api/login-options", api_server);
         let _ = create_http_client_with_url(&login_option_url);
-        write_guard.warmed_api_server = Some(api_server.to_owned());
+        OIDC_SESSION.write().unwrap().warmed_api_server = Some(api_server.to_owned());
     }
 
     fn auth(
@@ -220,8 +219,11 @@ impl OidcSession {
         self.auth_attempt
     }
 
-    fn cancel_auth_attempt(&mut self) {
+    fn cancel_auth_attempt(&mut self, reason: &str) {
         self.auth_attempt = self.auth_attempt.wrapping_add(1);
+        self.code_url = None;
+        self.auth_body = None;
+        self.set_state(REQUESTING_ACCOUNT_AUTH, reason.to_owned());
     }
 
     fn is_current_auth_attempt(&self, auth_attempt: u64) -> bool {
@@ -247,13 +249,16 @@ impl OidcSession {
     }
 
     fn auth_task(
-        api_server: String,
         op: String,
-        id: String,
-        uuid: String,
         remember_me: bool,
         auth_attempt: u64,
     ) {
+        let (api_server, deployment) = super::account_login_context();
+        let id = crate::ui_interface::get_id();
+        let uuid = crate::ui_interface::get_uuid();
+        if !Self::auth_attempt_is_current(auth_attempt) {
+            return;
+        }
         let auth_request_res = Self::auth(&api_server, &op, &id, &uuid);
         log::info!("Request oidc auth result: {:?}", &auth_request_res);
         if !Self::auth_attempt_is_current(auth_attempt) {
@@ -297,15 +302,22 @@ impl OidcSession {
             }
             match query_result {
                 Ok(HbbHttpResponse::<_>::Data(auth_body)) => {
+                    if super::account_login_context().1 != deployment {
+                        let mut session = OIDC_SESSION.write().unwrap();
+                        if session.is_current_auth_attempt(auth_attempt) {
+                            session.cancel_auth_attempt("Server configuration changed");
+                        }
+                        return;
+                    }
                     let mut session = OIDC_SESSION.write().unwrap();
                     if !session.is_current_auth_attempt(auth_attempt) {
                         return;
                     }
                     if auth_body.r#type == "access_token" {
                         if remember_me {
-                            LocalConfig::set_option(
-                                "access_token".to_owned(),
+                            super::store_account_token(
                                 auth_body.access_token.clone(),
+                                &deployment,
                             );
                             LocalConfig::set_option(
                                 "user_info".to_owned(),
@@ -359,13 +371,7 @@ impl OidcSession {
         }
     }
 
-    pub fn account_auth(
-        api_server: String,
-        op: String,
-        id: String,
-        uuid: String,
-        remember_me: bool,
-    ) {
+    pub fn account_auth(op: String, remember_me: bool) {
         let auth_attempt = OIDC_SESSION.write().unwrap().start_auth_attempt();
         Self::wait_stop_querying();
         {
@@ -376,7 +382,7 @@ impl OidcSession {
             session.before_task();
         }
         std::thread::spawn(move || {
-            Self::auth_task(api_server, op, id, uuid, remember_me, auth_attempt);
+            Self::auth_task(op, remember_me, auth_attempt);
             OIDC_SESSION.write().unwrap().after_task();
         });
     }
@@ -390,8 +396,11 @@ impl OidcSession {
         }
     }
 
-    pub fn auth_cancel() {
-        OIDC_SESSION.write().unwrap().cancel_auth_attempt();
+    pub fn auth_cancel() -> String {
+        let mut session = OIDC_SESSION.write().unwrap();
+        let token = LocalConfig::get_option(super::ACCESS_TOKEN);
+        session.cancel_auth_attempt("Cancelled");
+        token
     }
 
     pub fn get_result() -> AuthResult {

@@ -1247,7 +1247,7 @@ mod tests {
             fn handle_login_error(&self, _err: &str) -> bool {
                 false
             }
-            fn handle_peer_info(&self, _pi: PeerInfo) {}
+            fn handle_peer_info(&self, _pi: PeerInfo, _trust: &crate::trusted_devices::client::Session) {}
             fn set_multiple_windows_session(&self, _sessions: Vec<WindowsSession>) {}
             async fn handle_hash(&self, _pass: &str, _hash: Hash, _trust: &mut crate::trusted_devices::client::Session, _peer: &mut Stream) -> bool {
                 false

@@ -28,6 +28,9 @@ pub enum CoreMainAction {
     ExitFailure(hbb_common::anyhow::Error),
 }
 
+#[cfg(any(feature = "flutter", test))]
+const ENCODED_CONNECTION_URI_PREFIX: &str = "rustdesk://connect-id/peer/";
+
 #[cfg(target_os = "macos")]
 fn finish_macos_update(result: hbb_common::ResultType<()>) -> Option<CoreMainAction> {
     match result {
@@ -184,8 +187,10 @@ pub fn core_main() -> Option<CoreMainAction> {
 
     // linux uni (url) go here.
     #[cfg(all(target_os = "linux", feature = "flutter"))]
-    if args.len() > 0 && args[0].starts_with(&crate::get_uri_prefix()) {
-        return try_send_by_dbus(args[0].clone()).map(CoreMainAction::StartUi);
+    if let Some(uri) = args.first().filter(|arg| {
+        arg.starts_with(&crate::get_uri_prefix()) || arg.starts_with(ENCODED_CONNECTION_URI_PREFIX)
+    }) {
+        return try_send_by_dbus(uri.clone()).map(CoreMainAction::StartUi);
     }
 
     #[cfg(windows)]
@@ -788,29 +793,26 @@ fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<Strin
             _ => {}
         }
     }
-    let mut uni_links = Default::default();
-    if let Some(authority) = authority {
-        if let Some(mut id) = id {
-            let app_name = crate::get_app_name();
-            let ext = format!(".{}", app_name.to_lowercase());
-            if id.ends_with(&ext) {
-                id = id.replace(&ext, "");
-            }
-            let params = param_array.join("&");
-            let params_flag = if params.is_empty() { "" } else { "?" };
-            uni_links = format!(
-                "{}{}/{}{}{}",
-                crate::get_uri_prefix(),
-                authority,
-                id,
-                params_flag,
-                params
-            );
-        }
+    let authority = authority?;
+    let mut id = id?;
+    let ext = format!(".{}", crate::get_app_name().to_lowercase());
+    let path = std::path::Path::new(&id);
+    let recent_connection_file = cfg!(windows)
+        && authority == "play"
+        && path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(&ext[1..]));
+    if recent_connection_file {
+        // The runner transfers foreground permission before dispatching this link.
+        return Some(vec![recent_connection_uri(path, &param_array)?]);
     }
-    if uni_links.is_empty() {
-        return None;
+    if id.ends_with(&ext) {
+        id = id.replace(&ext, "");
     }
+    let uri_prefix = crate::get_uri_prefix();
+    let params = param_array.join("&");
+    let params_flag = if params.is_empty() { "" } else { "?" };
+    let uni_links = format!("{uri_prefix}{authority}/{id}{params_flag}{params}");
 
     #[cfg(target_os = "linux")]
     return try_send_by_dbus(uni_links);
@@ -834,6 +836,114 @@ fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<Strin
         } else {
             None
         };
+    }
+}
+
+#[cfg(any(feature = "flutter", test))]
+fn recent_connection_uri(path: &std::path::Path, params: &[String]) -> Option<String> {
+    let recent = crate::ui_session_interface::recent_connection_target(path)?;
+    let direct = !recent.target.contains('@') && crate::common::is_direct_ip_access(&recent.target);
+    let ipv6_authority = (direct && recent.target.starts_with('['))
+        .then(|| format!("{}{}", crate::get_uri_prefix(), recent.target));
+    let mut link = if let Some(original) = &ipv6_authority {
+        url::Url::parse(original).ok()?
+    } else {
+        let prefix = if direct {
+            format!("{}connect/", crate::get_uri_prefix())
+        } else {
+            ENCODED_CONNECTION_URI_PREFIX.to_owned()
+        };
+        let mut link = url::Url::parse(&prefix).ok()?;
+        link.path_segments_mut().ok()?.pop_if_empty().push(&recent.target);
+        link
+    };
+    if !direct || !params.is_empty() {
+        let mut query = link.query_pairs_mut();
+        if !recent.key.is_empty() {
+            query.append_pair("key", &recent.key);
+        }
+        if recent.prefer_current {
+            query.append_pair("prefer_current", "1");
+        }
+        if !recent.endpoint.is_empty() {
+            query.append_pair("endpoint", &recent.endpoint);
+        }
+        if !direct && (params.is_empty() || recent.prefer_current || !recent.endpoint.is_empty()) {
+            query.append_pair("recent", "true");
+        }
+        query.extend_pairs(params.iter().filter_map(|param| param.split_once('=')));
+    }
+    if let Some(mut original) = ipv6_authority {
+        // Serializing Url would compress the IPv6 address the legacy direct parser reads.
+        if let Some(query) = link.query() {
+            original.push('?');
+            original.push_str(query);
+        }
+        return Some(original);
+    }
+    Some(link.into())
+}
+
+#[cfg(test)]
+mod recent_connection_tests {
+    #[test]
+    fn direct_recent_shortcuts_use_the_legacy_direct_connection() {
+        let path = std::path::Path::new("Recent Connections/aux.example.com:21118.rustdesk");
+        assert_eq!(
+            super::recent_connection_uri(path, &[]).as_deref(),
+            Some("rustdesk://connect/aux.example.com:21118")
+        );
+    }
+
+    #[test]
+    fn recent_connection_uri_preserves_the_device_id_and_parameters() {
+        let path = std::path::Path::new("Recent Connections/OfficeMünchen@server.example.RUSTDESK");
+        let params = ["password=a+b&c=d".to_owned(), "relay=true".to_owned()];
+        assert_eq!(
+            super::recent_connection_uri(path, &params).as_deref(),
+            Some("rustdesk://connect-id/peer/OfficeM%C3%BCnchen@server.example?password=a%2Bb%26c%3Dd&relay=true")
+        );
+    }
+
+    #[test]
+    fn recent_connection_uri_opens_the_long_endpoint() {
+        use crate::ui_session_interface::{
+            recent_connection_file_name, store_recent_connection, RecentConnection,
+        };
+        use std::path::PathBuf;
+
+        struct Directory(PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+        std::fs::create_dir(&directory.0).unwrap();
+        let id = format!(
+            "OfficePC@{}.{}.{}.example:21116",
+            "A".repeat(62), "B".repeat(62), "C".repeat(62)
+        );
+        let key = crate::encode64([255u8; 32]);
+        let recent = RecentConnection {
+            target: id.clone(),
+            key: key.clone(),
+            prefer_current: true,
+            endpoint: String::new(),
+        };
+        let path = directory.0.join(recent_connection_file_name(&recent, "rustdesk").unwrap());
+        store_recent_connection(&path, &recent).unwrap();
+        let uri = super::recent_connection_uri(&path, &[]).unwrap();
+        let parsed = url::Url::parse(&uri).unwrap();
+        assert_eq!(parsed.path(), format!("/peer/{id}"));
+        let query: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+        assert_eq!(query.get("key").map(|value| value.as_ref()), Some(key.as_str()));
+        assert_eq!(query.get("prefer_current").map(|value| value.as_ref()), Some("1"));
+        assert_eq!(query.get("recent").map(|value| value.as_ref()), Some("true"));
+        std::fs::write(&path, "RustDesk recent connection 2\nOfficePC@other.example\n\n1").unwrap();
+        assert!(store_recent_connection(&path, &recent).is_err());
+        assert!(super::recent_connection_uri(&path, &[]).is_none());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("OfficePC@other.example"));
     }
 }
 

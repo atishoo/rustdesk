@@ -412,7 +412,7 @@ class FfiModel with ChangeNotifier {
         _handlePortableServiceRunning(peerId, evt);
       } else if (name == 'on_url_scheme_received') {
         // currently comes from "_url" ipc of mac and dbus of linux
-        onUrlSchemeReceived(evt);
+        await onUrlSchemeReceived(evt);
       } else if (name == 'on_voice_call_waiting') {
         // Waiting for the response from the peer.
         parent.target?.chatModel.onVoiceCallWaiting();
@@ -742,10 +742,9 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  onUrlSchemeReceived(Map<String, dynamic> evt) {
+  Future<void> onUrlSchemeReceived(Map<String, dynamic> evt) async {
     final url = evt['url'].toString().trim();
-    if (url.startsWith(bind.mainUriPrefixSync()) &&
-        handleUriLink(uriString: url)) {
+    if (isRustDeskUri(url) && await handleUriLink(uriString: url)) {
       return;
     }
     switch (url) {
@@ -4125,6 +4124,7 @@ class FFI {
     int? display,
     List<int>? displays,
     String loginMethod = '',
+    String? expectedRendezvous,
   }) {
     closed = false;
     if (isMobile) mobileReset();
@@ -4171,7 +4171,17 @@ class FFI {
         isSharedPassword: isSharedPassword ?? false,
         connToken: connToken,
         loginMethod: loginMethod,
+        expectedRendezvous: expectedRendezvous,
       );
+      if (addRes.isNotEmpty &&
+          (expectedRendezvous != null || connectionTokenTarget(connToken) != null ||
+              addRes.endsWith('Already exists'))) {
+        Future<void>.delayed(Duration.zero, () async {
+          await ffiModel.showMsgBox(sessionId, 'error', 'Connection Error',
+              addRes, '', false, dialogManager);
+        });
+        return;
+      }
     } else if (display != null) {
       if (displays == null) {
         debugPrint(

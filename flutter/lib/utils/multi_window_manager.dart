@@ -8,6 +8,8 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/models/input_model.dart';
+import 'package:flutter_hbb/models/model.dart' show ConnType;
+import 'package:flutter_hbb/models/platform_model.dart';
 
 /// must keep the order
 // ignore: constant_identifier_names
@@ -67,12 +69,14 @@ class RustDeskMultiWindowManager {
   final List<int> _terminalWindows = List.empty(growable: true);
 
   moveTabToNewWindow(int windowId, String peerId, String sessionId,
-      WindowType windowType) async {
+      WindowType windowType,
+      {String? expectedRendezvous}) async {
     var params = {
       'type': windowType.index,
       'id': peerId,
       'tab_window_id': windowId,
       'session_id': sessionId,
+      if (expectedRendezvous != null) 'expectedRendezvous': expectedRendezvous,
     };
     if (windowType == WindowType.RemoteDesktop) {
       await _newSession(
@@ -231,7 +235,23 @@ class RustDeskMultiWindowManager {
     bool? isRDP,
     bool? isSharedPassword,
     String? connToken,
+    String? recentConnection,
+    String? expectedRendezvous,
   }) async {
+    final scopedTarget = connectionTokenTarget(connToken);
+    if (scopedTarget != null) {
+      remoteId = scopedTarget;
+      final connType = switch (type) {
+        WindowType.FileTransfer => ConnType.fileTransfer,
+        WindowType.ViewCamera => ConnType.viewCamera,
+        WindowType.PortForward => isRDP == true ? ConnType.rdp : ConnType.portForward,
+        _ => ConnType.defaultConn,
+      };
+      if (bind.peerGetSessionsCount(id: scopedTarget, connType: connType.index) > 0) {
+        showToast(translate('Already exists'));
+        return MultiWindowCallResult(kWindowMainId, null);
+      }
+    }
     var params = {
       "type": type.index,
       "id": remoteId,
@@ -253,22 +273,43 @@ class RustDeskMultiWindowManager {
     if (loginMethod.isNotEmpty) {
       params['loginMethod'] = loginMethod;
     }
-    final msg = jsonEncode(params);
-
+    if (expectedRendezvous != null) {
+      params['expectedRendezvous'] = expectedRendezvous;
+    }
     // separate window for file transfer is not supported
     bool openInTabs = type != WindowType.RemoteDesktop ||
         mainGetLocalBoolOptionSync(kOptionOpenNewConnInTabs);
-
-    if (windows.length > 1 || !openInTabs) {
+    if (scopedTarget == null &&
+        (recentConnection != null || expectedRendezvous != null ||
+            windows.length > 1 || !openInTabs)) {
+      final activate = recentConnection != null
+          ? kWindowEventActiveRecentSession
+          : kWindowEventActiveSession;
+      final target = expectedRendezvous == null
+          ? remoteId
+          : {
+              'id': remoteId,
+              'expectedRendezvous': expectedRendezvous,
+              if (forceRelay == true) 'forceRelay': true,
+            };
       for (final windowId in windows) {
-        if (await DesktopMultiWindow.invokeMethod(
-            windowId, kWindowEventActiveSession, remoteId)) {
+        if (await DesktopMultiWindow.invokeMethod(windowId, activate, target)) {
           return MultiWindowCallResult(windowId, null);
         }
       }
     }
 
-    return _newSession(openInTabs, type, methodName, remoteId, windows, msg);
+    if (expectedRendezvous != null || recentConnection != null) {
+      if (bind.peerGetSessionsCount(
+              id: remoteId, connType: ConnType.defaultConn.index) >
+          0) {
+        await windowOnTop(null);
+        showToast(translate('Already exists'));
+        return MultiWindowCallResult(kWindowMainId, null);
+      }
+    }
+    return _newSession(
+        openInTabs, type, methodName, remoteId, windows, jsonEncode(params));
   }
 
   Future<MultiWindowCallResult> newRemoteDesktop(
@@ -278,6 +319,8 @@ class RustDeskMultiWindowManager {
     bool? isSharedPassword,
     String? switchUuid,
     bool? forceRelay,
+    String? recentConnection,
+    String? expectedRendezvous,
   }) async {
     return await newSession(
       WindowType.RemoteDesktop,
@@ -289,6 +332,8 @@ class RustDeskMultiWindowManager {
       forceRelay: forceRelay,
       switchUuid: switchUuid,
       isSharedPassword: isSharedPassword,
+      recentConnection: recentConnection,
+      expectedRendezvous: expectedRendezvous,
     );
   }
 
@@ -367,13 +412,23 @@ class RustDeskMultiWindowManager {
     bool? forceRelay,
     String? connToken,
   }) async {
+    final scopedTarget = connectionTokenTarget(connToken);
+    if (scopedTarget != null) {
+      remoteId = scopedTarget;
+      if (bind.peerGetSessionsCount(id: scopedTarget, connType: ConnType.terminal.index) > 0) {
+        showToast(translate('Already exists'));
+        return MultiWindowCallResult(kWindowMainId, null);
+      }
+    }
     // Iterate through terminal windows in reverse order to prioritize
     // the most recently added or used windows, as they are more likely
     // to have an active session.
-    for (final windowId in _terminalWindows.reversed) {
-      if (await DesktopMultiWindow.invokeMethod(
-          windowId, kWindowEventActiveSession, remoteId)) {
-        return MultiWindowCallResult(windowId, null);
+    if (scopedTarget == null) {
+      for (final windowId in _terminalWindows.reversed) {
+        if (await DesktopMultiWindow.invokeMethod(
+            windowId, kWindowEventActiveSession, remoteId)) {
+          return MultiWindowCallResult(windowId, null);
+        }
       }
     }
 
