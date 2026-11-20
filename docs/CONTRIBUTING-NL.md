@@ -1,11 +1,11 @@
-# Bijdragen aan RustDesk
+# Bijdragen aan capylink
 
-RustDesk verwelkomt bijdragen van iedereen. Hier zijn de richtlijnen als u denkt 
+capylink verwelkomt bijdragen van iedereen. Hier zijn de richtlijnen als u denkt
 ons te willen helpen:
 
 ## Bijdragen
 
-Bijdragen aan RustDesk of haar afhankelijkheden moeten worden gedaan in de 
+Bijdragen aan capylink of haar afhankelijkheden moeten worden gedaan in de
 vorm van GitHub pull verzoeken. Elk pull verzoek zal worden beoordeeld door 
 een core bijdrager (iemand met toestemming om patches te plaatsen) en ofwel 
 worden geplaatst in de hoofd structuur of feedback krijgen voor veranderingen 
@@ -33,9 +33,7 @@ inspanningen van medewerkers aan hetzelfde issue te voorkomen.
   voorwaarden van het [project licentie](../LICENCE). 
   In git is dit de `-s` optie van `git commit`
 
-- Als je patch niet beoordeeld wordt of je hebt een specifiek persoon nodig om hem 
-  te beoordelen kunt u @-reply een reviewer vragen in het pull verzoek of een
-  commentaar, of je kunt om een review vragen via [email](mailto:info@rustdesk.com).
+- Vraag om een review in de pull request van deze repository.
 
 - Tests toevoegen die relevant zijn voor de gerepareerde bug of de nieuwe functie.
 
@@ -43,8 +41,8 @@ Voor specifieke git instructies, zie [GitHub workflow 101](https://github.com/se
 
 ## Gedrag
 
-https://github.com/rustdesk/rustdesk/blob/master/docs/CODE_OF_CONDUCT.md
+https://github.com/atishoo/rustdesk/blob/ultrapro/docs/CODE_OF_CONDUCT.md
 
 ## Communicatie
 
-RustDesk medewerkers bezoeken frequent [Discord](https://discord.gg/nDceKgxnkV).
+Gebruik de issues en pull requests van deze repository om het project te bespreken.

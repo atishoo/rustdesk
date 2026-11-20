@@ -1,11 +1,11 @@
-# Contributing to RustDesk
+# Contributing to capylink
 
-RustDesk welcomes contributions from everyone. Here are the guidelines if you are
+capylink welcomes contributions from everyone. Here are the guidelines if you are
 thinking of helping us:
 
 ## Contributions
 
-Contributions to RustDesk or its dependencies should be made in the form of GitHub
+Contributions to capylink or its dependencies should be made in the form of GitHub
 pull requests. Each pull request will be reviewed by a core contributor
 (someone with permission to land patches) and either landed in the main tree or
 given feedback for changes that would be required. All contributions should
@@ -29,9 +29,7 @@ efforts from contributors on the same issue.
   your employer if applicable) agree to be bound by the terms of the
   [project license](../LICENCE). In git, this is the `-s` option to `git commit`
 
-- If your patch is not getting reviewed or you need a specific person to review
-  it, you can @-reply a reviewer asking for a review in the pull request or a
-  comment, or you can ask for a review via [email](mailto:info@rustdesk.com).
+- Request a review through the pull request in this repository.
 
 - Add tests relevant to the fixed bug or new feature.
 
@@ -39,8 +37,8 @@ For specific git instructions, see [GitHub workflow 101](https://github.com/serv
 
 ## Conduct
 
-https://github.com/rustdesk/rustdesk/blob/master/docs/CODE_OF_CONDUCT.md
+https://github.com/atishoo/rustdesk/blob/ultrapro/docs/CODE_OF_CONDUCT.md
 
 ## Communication
 
-RustDesk contributors frequent the [Discord](https://discord.gg/nDceKgxnkV).
+Use this repository's issues and pull requests for project discussions.

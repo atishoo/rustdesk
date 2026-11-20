@@ -3,22 +3,22 @@ use super::*;
 #[test]
 fn copy_and_verify_update_artifact_hashes_open_file_handle() {
     let test_dir = std::env::temp_dir().join(format!(
-        "rustdesk-updater-open-handle-sha256-test-{}",
+        "capylink-updater-open-handle-sha256-test-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&test_dir);
     std::fs::create_dir_all(&test_dir).unwrap();
-    let final_path = test_dir.join("rustdesk-update.exe");
+    let final_path = test_dir.join("capylink-update.exe");
     let (mut file, _) = create_download_temp_file(&final_path).unwrap();
     let display_path = test_dir.join("path-must-not-be-opened.download");
-    let mut data: &[u8] = b"rustdesk";
+    let mut data: &[u8] = b"capylink";
 
     let result = copy_and_verify_update_artifact(
         &mut file,
         &display_path,
         &mut data,
         8,
-        "304ca1638c5effa6832e0e15b958a8f74847efe4df9c3f3187216e921c168fed",
+        "0ede0cf8871fe20ffb6d4a57abf3d6d759652b76d7b98cf1e5cdf8a39363d69a",
     );
     let position = result
         .as_ref()
@@ -35,12 +35,12 @@ fn copy_and_verify_update_artifact_hashes_open_file_handle() {
 #[test]
 fn verified_download_replaces_symlink_without_touching_target() {
     let test_dir = std::env::temp_dir().join(format!(
-        "rustdesk-updater-symlink-test-{}",
+        "capylink-updater-symlink-test-{}",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&test_dir);
     std::fs::create_dir_all(&test_dir).unwrap();
-    let final_path = test_dir.join("rustdesk-update.exe");
+    let final_path = test_dir.join("capylink-update.exe");
     let victim_path = test_dir.join("victim");
     std::fs::write(&victim_path, b"victim").unwrap();
     std::os::unix::fs::symlink(&victim_path, &final_path).unwrap();

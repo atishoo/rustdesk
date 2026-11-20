@@ -5,8 +5,8 @@ use hbb_common::{
 use std::{io::Read, path::Path};
 
 const UPDATE_SIDECAR_MAX_BYTES: u64 = 1024 * 1024;
-const PUBLIC_MACOS_BUNDLE_ID: &str = "com.carriez.rustdesk";
-const MACOS_UPDATE_USAGE: &str = "Usage: --update [update.dmg --metadata rustdesk-update.json --signature rustdesk-update.json.sig]";
+const PUBLIC_MACOS_BUNDLE_ID: &str = "com.carriez.capylink";
+const MACOS_UPDATE_USAGE: &str = "Usage: --update [update.dmg --metadata capylink-update.json --signature capylink-update.json.sig]";
 const LEGACY_UPDATE_WARNING: &str =
     "legacy offline update: signed metadata not found; release hash was not verified";
 
@@ -168,16 +168,16 @@ mod tests {
         assert_eq!(
             MacosUpdateArguments::VerifiedDmg {
                 dmg_path: "update.dmg",
-                metadata_path: "rustdesk-update.json",
-                signature_path: "rustdesk-update.json.sig",
+                metadata_path: "capylink-update.json",
+                signature_path: "capylink-update.json.sig",
             },
             parse_macos_update_args(&args(&[
                 "--update",
                 "update.dmg",
                 "--metadata",
-                "rustdesk-update.json",
+                "capylink-update.json",
                 "--signature",
-                "rustdesk-update.json.sig",
+                "capylink-update.json.sig",
             ]))
             .unwrap()
         );
@@ -186,12 +186,12 @@ mod tests {
     #[test]
     fn resolves_public_and_custom_update_package_identity() {
         assert_eq!(
-            "rustdesk",
-            expected_update_package_id(false, Some("com.carriez.rustdesk".to_owned())).unwrap()
+            "capylink",
+            expected_update_package_id(false, Some("com.carriez.capylink".to_owned())).unwrap()
         );
         assert_eq!(
-            "com.example.rustdesk-custom",
-            expected_update_package_id(true, Some("com.example.rustdesk-custom".to_owned()))
+            "com.example.capylink-custom",
+            expected_update_package_id(true, Some("com.example.capylink-custom".to_owned()))
                 .unwrap()
         );
         assert_eq!(
@@ -200,8 +200,8 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(
-            "com.carriez.rustdesk",
-            expected_update_package_id(true, Some("com.carriez.rustdesk".to_owned())).unwrap()
+            "com.carriez.capylink",
+            expected_update_package_id(true, Some("com.carriez.capylink".to_owned())).unwrap()
         );
         assert!(expected_update_package_id(false, None).is_err());
         assert!(expected_update_package_id(true, None).is_err());

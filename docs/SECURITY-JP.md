@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # セキュリティポリシー
 
 ## 脆弱性の報告

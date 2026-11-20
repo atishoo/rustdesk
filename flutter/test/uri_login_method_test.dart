@@ -5,7 +5,7 @@ import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-class _RendezvousBinding extends Fake implements RustdeskImpl {
+class _RendezvousBinding extends Fake implements CapylinkImpl {
   bool matches = false;
   bool rejectBare = false;
   String? selectedWebsocket;
@@ -61,22 +61,22 @@ void main() {
     ]) {
       expect(
         await urlLinkToCmdArgs(
-            Uri.parse('rustdesk://$type/123456789?request-approval=true')),
+            Uri.parse('capylink://$type/123456789?request-approval=true')),
         ['--$type', '123456789', '--request-approval'],
       );
     }
     expect(
       await urlLinkToCmdArgs(
-          Uri.parse('rustdesk://123456789?request-approval=true')),
+          Uri.parse('capylink://123456789?request-approval=true')),
       ['--connect', '123456789', '--request-approval'],
     );
   });
 
   test('omitted and empty passwords retain automatic login', () async {
-    expect(await urlLinkToCmdArgs(Uri.parse('rustdesk://123456789')),
+    expect(await urlLinkToCmdArgs(Uri.parse('capylink://123456789')),
         ['--connect', '123456789']);
     for (final query in ['password=', 'password=&request-approval=false']) {
-      expect(await urlLinkToCmdArgs(Uri.parse('rustdesk://123456789?$query')),
+      expect(await urlLinkToCmdArgs(Uri.parse('capylink://123456789?$query')),
           ['--connect', '123456789', '--password', '']);
     }
   });
@@ -87,7 +87,7 @@ void main() {
       'password=provided&request-approval=true',
       'request-approval=true&password=provided',
     ]) {
-      expect(await urlLinkToCmdArgs(Uri.parse('rustdesk://123456789?$query')),
+      expect(await urlLinkToCmdArgs(Uri.parse('capylink://123456789?$query')),
           ['--connect', '123456789', '--request-approval']);
     }
   });
@@ -96,21 +96,21 @@ void main() {
       () async {
     const id = 'OfficeMünchen/r@Server:21117';
     final uri =
-        Uri.parse('rustdesk://connect-id/peer/${Uri.encodeComponent(id)}');
+        Uri.parse('capylink://connect-id/peer/${Uri.encodeComponent(id)}');
     expect(
         await urlLinkToCmdArgs(uri), serverConnectionArgs(id, 'Server:21117'));
     for (final suffix in ['', '/r']) {
-      expect(await urlLinkToCmdArgs(Uri.parse('rustdesk://connect-id$suffix')),
+      expect(await urlLinkToCmdArgs(Uri.parse('capylink://connect-id$suffix')),
           ['--connect', 'connect-id$suffix']);
     }
     const websocketTarget = 'OfficePC@wss://Server:21117/r';
     expect(
       await urlLinkToCmdArgs(Uri.parse(
-          'rustdesk://connect-id/peer/${Uri.encodeComponent(websocketTarget)}')),
+          'capylink://connect-id/peer/${Uri.encodeComponent(websocketTarget)}')),
       serverConnectionArgs(websocketTarget, 'wss://Server:21117/r'),
     );
     const cliTarget = 'OfficePC@ws://Server:21117/custom%2Froute%20one';
-    expect(await urlLinkToCmdArgs(Uri.parse('rustdesk://connect/$cliTarget')),
+    expect(await urlLinkToCmdArgs(Uri.parse('capylink://connect/$cliTarget')),
         ['--connect', cliTarget]);
   });
 
@@ -137,7 +137,7 @@ void main() {
       'Office%E2%80%A8PC',
     ]) {
       expect(
-          await urlLinkToCmdArgs(Uri.parse('rustdesk://connect-id/peer/$path')),
+          await urlLinkToCmdArgs(Uri.parse('capylink://connect-id/peer/$path')),
           isNull);
     }
   });
@@ -148,7 +148,7 @@ void main() {
     final encoded = Uri.encodeComponent(id);
     expect(
       await urlLinkToCmdArgs(
-          Uri.parse('rustdesk://connect-id/peer/$encoded?key=test%2B%2F%3D')),
+          Uri.parse('capylink://connect-id/peer/$encoded?key=test%2B%2F%3D')),
       serverConnectionArgs('$id?key=test+/=', 'Server:21117', 'test+/='),
     );
     for (final target in [
@@ -159,7 +159,7 @@ void main() {
     ]) {
       expect(
         await urlLinkToCmdArgs(Uri.parse(
-            'rustdesk://connect-id/peer/${Uri.encodeComponent(target)}')),
+            'capylink://connect-id/peer/${Uri.encodeComponent(target)}')),
         isNull,
       );
     }
@@ -173,7 +173,7 @@ void main() {
     ]) {
       expect(
           await urlLinkToCmdArgs(
-              Uri.parse('rustdesk://connect-id/peer/$encoded?$query')),
+              Uri.parse('capylink://connect-id/peer/$encoded?$query')),
           isNull);
     }
   });
@@ -181,7 +181,7 @@ void main() {
   test('only encoded connections can select the native peer identity',
       () async {
     const target = 'OfficePC/r@Server:21117';
-    final link = 'rustdesk://connect-id/peer/${Uri.encodeComponent(target)}';
+    final link = 'capylink://connect-id/peer/${Uri.encodeComponent(target)}';
     expect(
       await urlLinkToCmdArgs(Uri.parse('$link?key=test&prefer_current=1')),
       serverConnectionArgs('$target?key=test', 'Server:21117', 'test'),
@@ -198,12 +198,12 @@ void main() {
     );
     expect(
       await urlLinkToCmdArgs(
-          Uri.parse('rustdesk://connect-id/peer/OfficePC?prefer_current=1')),
+          Uri.parse('capylink://connect-id/peer/OfficePC?prefer_current=1')),
       serverConnectionArgs('OfficePC', 'Server:21116'),
     );
     expect(
       await urlLinkToCmdArgs(
-          Uri.parse('rustdesk://connect/$target?key=test&prefer_current=1')),
+          Uri.parse('capylink://connect/$target?key=test&prefer_current=1')),
       ['--connect', '$target?key=test'],
     );
     expect(binding.requests,
@@ -215,7 +215,7 @@ void main() {
     const target = 'OfficePC@Server:21117';
     binding.matches = true;
     binding.selectedWebsocket = 'wss://server:8443/ws/id';
-    final link = 'rustdesk://connect-id/peer/${Uri.encodeComponent(target)}';
+    final link = 'capylink://connect-id/peer/${Uri.encodeComponent(target)}';
     expect(
       await urlLinkToCmdArgs(Uri.parse('$link?key=test&prefer_current=1')),
       [
@@ -231,7 +231,7 @@ void main() {
       () async {
     binding.configuredBareKey = 'configured-public-key';
     expect(
-      await urlLinkToCmdArgs(Uri.parse('rustdesk://connect-id/peer/OfficePC')),
+      await urlLinkToCmdArgs(Uri.parse('capylink://connect-id/peer/OfficePC')),
       serverConnectionArgs('OfficePC', 'Server:21116', 'configured-public-key'),
     );
   });
@@ -241,9 +241,9 @@ void main() {
     binding.rejectBare = true;
     expect(
         await urlLinkToCmdArgs(
-            Uri.parse('rustdesk://connect-id/peer/192.0.2.1?recent=true')),
+            Uri.parse('capylink://connect-id/peer/192.0.2.1?recent=true')),
         isNull);
-    expect(await urlLinkToCmdArgs(Uri.parse('rustdesk://connect/192.0.2.1')),
+    expect(await urlLinkToCmdArgs(Uri.parse('capylink://connect/192.0.2.1')),
         ['--connect', '192.0.2.1']);
     expect(binding.requests, [('192.0.2.1', '', false)]);
   });
@@ -251,7 +251,7 @@ void main() {
   test(
       'encoded connection preserves the password and approval takes precedence',
       () async {
-    const link = 'rustdesk://connect-id/peer/OfficePC?password=a%2Bb%26c%3Dd';
+    const link = 'capylink://connect-id/peer/OfficePC?password=a%2Bb%26c%3Dd';
     expect(await urlLinkToCmdArgs(Uri.parse(link)),
         [
           '--connect', 'OfficePC', '--password', 'a+b&c=d',

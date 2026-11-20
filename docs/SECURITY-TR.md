@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Güvenlik Politikası
 
 ## Bir Güvenlik Açığı Bildirme

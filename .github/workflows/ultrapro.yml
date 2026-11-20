@@ -32,12 +32,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          work="$RUNNER_TEMP/rustdesk-macos-dmgs"
+          work="$RUNNER_TEMP/capylink-macos-dmgs"
           mkdir -p "$work"
           gh release download ultrapro \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern 'rustdesk-*-aarch64.dmg' \
-            --pattern 'rustdesk-*-x86_64.dmg' \
+            --pattern 'capylink-*-aarch64.dmg' \
+            --pattern 'capylink-*-x86_64.dmg' \
             --dir "$work"
 
           mount_point_from_plist() {
@@ -56,13 +56,13 @@ jobs:
           }
 
           for arch in aarch64 x86_64; do
-            input=$(find "$work" -maxdepth 1 -name "rustdesk-*-${arch}.dmg" -print -quit)
+            input=$(find "$work" -maxdepth 1 -name "capylink-*-${arch}.dmg" -print -quit)
             test -n "$input"
             plist="$work/${arch}.plist"
             hdiutil attach -readonly -nobrowse -plist "$input" > "$plist"
             mount_point=$(mount_point_from_plist "$plist")
-            app="$work/RustDesk-${arch}.app"
-            ditto "$mount_point/RustDesk.app" "$app"
+            app="$work/capylink-${arch}.app"
+            ditto "$mount_point/capylink.app" "$app"
             hdiutil detach "$mount_point" >/dev/null
 
             bash "$GITHUB_WORKSPACE/.github/scripts/sign-macos-app.sh" \
@@ -73,13 +73,13 @@ jobs:
             fixed="$work/fixed-${arch}.dmg"
             staging="$work/staging-${arch}"
             mkdir "$staging"
-            ditto "$app" "$staging/RustDesk.app"
+            ditto "$app" "$staging/capylink.app"
             ln -s /Applications "$staging/Applications"
-            hdiutil create -volname RustDesk -srcfolder "$staging" -ov -format UDZO "$fixed"
+            hdiutil create -volname capylink -srcfolder "$staging" -ov -format UDZO "$fixed"
             verify_plist="$work/${arch}-fixed.plist"
             hdiutil attach -readonly -nobrowse -plist "$fixed" > "$verify_plist"
             verify_mount=$(mount_point_from_plist "$verify_plist")
-            codesign --verify --deep --strict "$verify_mount/RustDesk.app"
+            codesign --verify --deep --strict "$verify_mount/capylink.app"
             hdiutil detach "$verify_mount" >/dev/null
             mv "$input" "$work/original-${arch}.dmg"
             mv "$fixed" "$input"

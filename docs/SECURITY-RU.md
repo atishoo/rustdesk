@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Политика безопасности
 
 ## Сообщение об уязвимости

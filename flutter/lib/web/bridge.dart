@@ -93,7 +93,7 @@ class CursorShape {
   });
 }
 
-class RustdeskImpl {
+class CapylinkImpl {
   String? _pendingAccountAuthApi;
   String? _pendingAccountAuthPriorToken;
   int _pendingAccountAuthAttempt = 0;
@@ -1832,8 +1832,8 @@ class RustdeskImpl {
   }
 
   bool isCustomClient({dynamic hint}) {
-    // is_custom_client() checks if app name is not "RustDesk"
-    return mainGetAppNameSync(hint: hint) != "RustDesk";
+    // is_custom_client() checks if app name is not "capylink"
+    return mainGetAppNameSync(hint: hint) != "capylink";
   }
 
   bool isDisableSettings({dynamic hint}) {

@@ -96,7 +96,7 @@ class _ScanPageState extends State<ScanPage> {
 
         var reader = QRCodeReader();
         var result = reader.decode(bitmap);
-        if (isRustDeskUri(result.text)) {
+        if (isCapyLinkUri(result.text)) {
           await handleUriLink(uriString: result.text);
         } else {
           showServerSettingFromQr(result.text);

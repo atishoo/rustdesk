@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Veiligheidsbeleid
 
 ## Een Kwetsbaarheid Melden

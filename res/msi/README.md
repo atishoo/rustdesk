@@ -1,4 +1,4 @@
-# RustDesk msi project
+# capylink msi project
 
 Use Visual Studio 2022 to compile this project.
 

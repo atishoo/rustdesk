@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Policy sicurezza
 
 ## Segnalazione di una vulnerabilità

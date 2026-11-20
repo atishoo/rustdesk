@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=capylink
+Name[zh_CN]=卡皮远控
+Name[zh_TW]=卡皮远控
+NoDisplay=true
+MimeType=x-scheme-handler/capylink;
+TryExec=capylink
+Exec=capylink %u
+Icon=capylink
+Terminal=false
+Type=Application
+StartupNotify=false
+StartupWMClass=capylink

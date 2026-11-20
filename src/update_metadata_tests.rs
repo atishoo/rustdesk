@@ -16,11 +16,11 @@ struct Fixture {
 }
 
 fn artifact() -> Value {
-    json!({"platform":"windows","arch":"x86_64","format":"exe","url":"https://github.com/rustdesk/rustdesk/releases/download/v1.4.6/rustdesk-1.4.6-x86_64.exe","file_name":"rustdesk-1.4.6-x86_64.exe","size":123456,"sha256":SHA256})
+    json!({"platform":"windows","arch":"x86_64","format":"exe","url":"https://github.com/rustdesk/rustdesk/releases/download/v1.4.6/capylink-1.4.6-x86_64.exe","file_name":"capylink-1.4.6-x86_64.exe","size":123456,"sha256":SHA256})
 }
 
 fn metadata() -> Value {
-    json!({"schema_version":1,"app":"rustdesk","package_id":"rustdesk","version":"1.4.6","release_id":"v1.4.6","published_at":"2026-05-14T00:00:00Z","signature_key_id":KEY_ID,"artifacts":[artifact()]})
+    json!({"schema_version":1,"app":"capylink","package_id":"capylink","version":"1.4.6","release_id":"v1.4.6","published_at":"2026-05-14T00:00:00Z","signature_key_id":KEY_ID,"artifacts":[artifact()]})
 }
 
 fn set_value(metadata: &mut Value, key: &str, value: Value, artifact_field: bool) {
@@ -100,7 +100,7 @@ fn verify(fixture: &Fixture) -> ResultType<VerifiedUpdateArtifact> {
 #[test]
 fn accepts_valid_metadata_and_signature() {
     let artifact = verify(&valid_fixture()).expect("verified artifact");
-    assert_eq!("rustdesk-1.4.6-x86_64.exe", artifact.file_name);
+    assert_eq!("capylink-1.4.6-x86_64.exe", artifact.file_name);
     assert_eq!(123456, artifact.size);
     assert_eq!(SHA256, artifact.sha256);
     assert_eq!("1.4.6", artifact.version);
@@ -135,7 +135,7 @@ fn rejects_schema_policy_artifact_and_url_mismatches() {
         ("package_id", json!("custom"), false), ("signature_key_id", json!("different-key"), false),
         ("arch", json!("x86"), true),
         ("sha256", json!("not-a-sha256"), true),
-        ("url", json!("https://github.com/rustdesk/rustdesk/releases/download/v1.4.7/rustdesk-1.4.6-x86_64.exe"), true),
+        ("url", json!("https://github.com/rustdesk/rustdesk/releases/download/v1.4.7/capylink-1.4.6-x86_64.exe"), true),
         ("url", json!("https://github.com/rustdesk/rustdesk/releases/download/v1.4.6/other.exe"), true),
     ];
     for (key, value, artifact_field) in cases {
@@ -149,12 +149,12 @@ fn rejects_schema_policy_artifact_and_url_mismatches() {
 fn rejects_artifact_file_name_path_components() {
     for file_name in [
         "",
-        "nested/rustdesk.exe",
-        r"nested\rustdesk.exe",
+        "nested/capylink.exe",
+        r"nested\capylink.exe",
         "..",
         "rust desk.exe",
-        "rustdesk*.exe",
-        "rustdesk\n.exe",
+        "capylink*.exe",
+        "capylink\n.exe",
         "rüstdesk.exe",
     ] {
         let mut invalid_metadata = metadata();
@@ -175,8 +175,8 @@ fn rejects_artifact_file_name_path_components() {
 #[test]
 fn verifies_metadata_generated_by_python_release_script_fixture() {
     const PYTHON_KEY_ID: &str = "python-test-ed25519-main";
-    let metadata = br#"{"schema_version":1,"app":"rustdesk","package_id":"rustdesk","version":"1.4.6","release_id":"v1.4.6","published_at":"2026-05-14T00:00:00Z","signature_key_id":"python-test-ed25519-main","artifacts":[{"platform":"windows","arch":"x86_64","format":"exe","url":"https://github.com/rustdesk/rustdesk/releases/download/v1.4.6/rustdesk-1.4.6-x86_64.exe","file_name":"rustdesk-1.4.6-x86_64.exe","size":8,"sha256":"304ca1638c5effa6832e0e15b958a8f74847efe4df9c3f3187216e921c168fed"}]}"#;
-    let signature = br#"{"schema_version":1,"algorithm":"ed25519","key_id":"python-test-ed25519-main","signature":"ZMcod9VNaEGTYK0gIfGmMQ44HAvrYAkYDyIL9JTKjzUH+hVFYs8KpvnGSlteAHwqiJuJDdiKBVCPEdtcRRAJCA=="}"#;
+    let metadata = br#"{"schema_version":1,"app":"capylink","package_id":"capylink","version":"1.4.6","release_id":"v1.4.6","published_at":"2026-05-14T00:00:00Z","signature_key_id":"python-test-ed25519-main","artifacts":[{"platform":"windows","arch":"x86_64","format":"exe","url":"https://github.com/rustdesk/rustdesk/releases/download/v1.4.6/capylink-1.4.6-x86_64.exe","file_name":"capylink-1.4.6-x86_64.exe","size":8,"sha256":"0ede0cf8871fe20ffb6d4a57abf3d6d759652b76d7b98cf1e5cdf8a39363d69a"}]}"#;
+    let signature = br#"{"schema_version":1,"algorithm":"ed25519","key_id":"python-test-ed25519-main","signature":"gXc6gvohYTCzDhnTZzlIltKzZXVTfaiHGKyL1jdMeEQ8HwweSnhXsK907E+iO6bu2fz2wMzG7dA9aoGxucJjCA=="}"#;
     let trusted_key = TrustedUpdateKey {
         key_id: PYTHON_KEY_ID,
         algorithm: "ed25519",
@@ -201,7 +201,7 @@ fn verifies_metadata_generated_by_python_release_script_fixture() {
     )
     .expect("Python-generated update metadata verifies");
 
-    assert_eq!("rustdesk-1.4.6-x86_64.exe", artifact.file_name);
+    assert_eq!("capylink-1.4.6-x86_64.exe", artifact.file_name);
 }
 
 #[path = "update_metadata/offline_tests.rs"]

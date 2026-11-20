@@ -59,7 +59,7 @@ mod mobile_wheel;
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 
 #[cfg(any(windows, feature = "flutter", test))]
-const RECENT_CONNECTION_HEADER: &str = "RustDesk recent connection 3\n";
+const RECENT_CONNECTION_HEADER: &str = "capylink recent connection 3\n";
 #[cfg(any(windows, feature = "flutter", test))]
 const MAX_RECENT_CONNECTION_BYTES: usize = 1024;
 
@@ -253,7 +253,7 @@ pub(crate) fn store_recent_connection(
     if let Some(directory) = path.parent() {
         fs::create_dir_all(directory)?;
     }
-    let scratch = path.with_file_name(format!(".rustdesk-recent-{}.tmp", Uuid::new_v4()));
+    let scratch = path.with_file_name(format!(".capylink-recent-{}.tmp", Uuid::new_v4()));
     let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&scratch)?;
     let written = (|| -> std::io::Result<()> {
         file.write_all(recent.content().as_bytes())?;
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn legacy_recent_connection_uses_the_plain_file_name() {
-        let path = std::path::Path::new("old shortcuts/OfficeMünchen.rustdesk");
+        let path = std::path::Path::new("old shortcuts/OfficeMünchen.capylink");
         assert_eq!(
             recent_connection_target(path).map(|recent| recent.target),
             Some("OfficeMünchen".to_owned())
@@ -300,17 +300,17 @@ mod tests {
 
     #[test]
     fn recent_connection_names_are_short_and_case_distinct() {
-        assert!(recent_connection_file_name(&recent("aux.example.com:21118"), "rustdesk").is_some());
+        assert!(recent_connection_file_name(&recent("aux.example.com:21118"), "capylink").is_some());
         let id = format!(
             "OfficePC@{}.{}.{}.example:21116",
             "A".repeat(62), "B".repeat(62), "C".repeat(62)
         );
-        let name = recent_connection_file_name(&recent(&id), "rustdesk").unwrap();
+        let name = recent_connection_file_name(&recent(&id), "capylink").unwrap();
         assert!(id.len() > 210 && name.encode_utf16().count() < 100);
         assert!(name.starts_with("%OfficePC-"));
         assert_ne!(
             name.to_ascii_lowercase(),
-            recent_connection_file_name(&recent(&id.to_ascii_lowercase()), "rustdesk")
+            recent_connection_file_name(&recent(&id.to_ascii_lowercase()), "capylink")
                 .unwrap()
                 .to_ascii_lowercase()
         );
@@ -325,7 +325,7 @@ mod tests {
             "OfficePC@server.example?key=value",
             "OfficePC@wss://user:password@server.example",
         ] {
-            assert_eq!(recent_connection_file_name(&recent(id), "rustdesk"), None);
+            assert_eq!(recent_connection_file_name(&recent(id), "capylink"), None);
         }
     }
 }
@@ -1961,7 +1961,7 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn printer_response(&self, id: i32, path: String, printer_name: String) {
         self.printer_names.write().unwrap().insert(id, printer_name);
-        let to = std::env::temp_dir().join(format!("rustdesk_printer_{id}"));
+        let to = std::env::temp_dir().join(format!("capylink_printer_{id}"));
         self.send(Data::SendFiles((
             id,
             base::fs::JobType::Printer,
@@ -2331,7 +2331,7 @@ pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
                 || handler.args[2].parse::<i32>().unwrap_or(0) <= 0
                 || port <= 0
             {
-                handler.on_error("Invalid arguments, usage:<br><br> rustdesk --port-forward remote-id listen-port remote-host remote-port");
+                handler.on_error("Invalid arguments, usage:<br><br> capylink --port-forward remote-id listen-port remote-host remote-port");
             }
             let remote_host = handler.args[1].clone();
             let remote_port = handler.args[2].parse::<i32>().unwrap_or(0);

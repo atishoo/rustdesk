@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 
 # Politique de sécurité
 

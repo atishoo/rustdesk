@@ -29,7 +29,7 @@ pub enum CoreMainAction {
 }
 
 #[cfg(any(feature = "flutter", test))]
-const ENCODED_CONNECTION_URI_PREFIX: &str = "rustdesk://connect-id/peer/";
+const ENCODED_CONNECTION_URI_PREFIX: &str = "capylink://connect-id/peer/";
 
 #[cfg(target_os = "macos")]
 fn finish_macos_update(result: hbb_common::ResultType<()>) -> Option<CoreMainAction> {
@@ -225,7 +225,7 @@ pub fn core_main() -> Option<CoreMainAction> {
     } else {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         // Root CLI management commands must talk to the user `--server` main IPC.
-        // Example: `sudo rustdesk --option custom-rendezvous-server` should query the
+        // Example: `sudo capylink --option custom-rendezvous-server` should query the
         // user's IPC instead of root's `/tmp/<app>-0/ipc`; `connect()` still limits this
         // routing to empty-postfix main IPC only.
         let _user_main_ipc_scope = if crate::platform::is_installed()
@@ -316,7 +316,7 @@ pub fn core_main() -> Option<CoreMainAction> {
                 #[cfg(windows)]
                 if crate::virtual_display_manager::is_virtual_display_supported() {
                     hbb_common::allow_err!(
-                        crate::virtual_display_manager::rustdesk_idd::install_update_driver()
+                        crate::virtual_display_manager::capylink_idd::install_update_driver()
                     );
                 }
                 return None;
@@ -714,7 +714,7 @@ pub fn core_main() -> Option<CoreMainAction> {
             }
             return None;
         } else if args[0] == "-gtk-sudo" {
-            // rustdesk service kill `rustdesk --` processes
+            // capylink service kill `capylink --` processes
             #[cfg(target_os = "linux")]
             if args.len() > 2 {
                 crate::platform::gtk_sudo::exec();
@@ -888,20 +888,20 @@ fn recent_connection_uri(path: &std::path::Path, params: &[String]) -> Option<St
 mod recent_connection_tests {
     #[test]
     fn direct_recent_shortcuts_use_the_legacy_direct_connection() {
-        let path = std::path::Path::new("Recent Connections/aux.example.com:21118.rustdesk");
+        let path = std::path::Path::new("Recent Connections/aux.example.com:21118.capylink");
         assert_eq!(
             super::recent_connection_uri(path, &[]).as_deref(),
-            Some("rustdesk://connect/aux.example.com:21118")
+            Some("capylink://connect/aux.example.com:21118")
         );
     }
 
     #[test]
     fn recent_connection_uri_preserves_the_device_id_and_parameters() {
-        let path = std::path::Path::new("Recent Connections/OfficeMünchen@server.example.RUSTDESK");
+        let path = std::path::Path::new("Recent Connections/OfficeMünchen@server.example.CAPYLINK");
         let params = ["password=a+b&c=d".to_owned(), "relay=true".to_owned()];
         assert_eq!(
             super::recent_connection_uri(path, &params).as_deref(),
-            Some("rustdesk://connect-id/peer/OfficeM%C3%BCnchen@server.example?password=a%2Bb%26c%3Dd&relay=true")
+            Some("capylink://connect-id/peer/OfficeM%C3%BCnchen@server.example?password=a%2Bb%26c%3Dd&relay=true")
         );
     }
 
@@ -931,7 +931,7 @@ mod recent_connection_tests {
             prefer_current: true,
             endpoint: String::new(),
         };
-        let path = directory.0.join(recent_connection_file_name(&recent, "rustdesk").unwrap());
+        let path = directory.0.join(recent_connection_file_name(&recent, "capylink").unwrap());
         store_recent_connection(&path, &recent).unwrap();
         let uri = super::recent_connection_uri(&path, &[]).unwrap();
         let parsed = url::Url::parse(&uri).unwrap();
@@ -940,7 +940,7 @@ mod recent_connection_tests {
         assert_eq!(query.get("key").map(|value| value.as_ref()), Some(key.as_str()));
         assert_eq!(query.get("prefer_current").map(|value| value.as_ref()), Some("1"));
         assert_eq!(query.get("recent").map(|value| value.as_ref()), Some("true"));
-        std::fs::write(&path, "RustDesk recent connection 2\nOfficePC@other.example\n\n1").unwrap();
+        std::fs::write(&path, "capylink recent connection 2\nOfficePC@other.example\n\n1").unwrap();
         assert!(store_recent_connection(&path, &recent).is_err());
         assert!(super::recent_connection_uri(&path, &[]).is_none());
         assert!(std::fs::read_to_string(&path).unwrap().contains("OfficePC@other.example"));

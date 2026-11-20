@@ -1,11 +1,11 @@
-# Beiträge zu RustDesk
+# Beiträge zu capylink
 
-RustDesk begrüßt Beiträge von jedem. Hier sind die Richtlinien, wenn Sie uns
+capylink begrüßt Beiträge von jedem. Hier sind die Richtlinien, wenn Sie uns
 helfen möchten:
 
 ## Beiträge
 
-Beiträge zu RustDesk oder seinen Abhängigkeiten sollten in Form von Pull
+Beiträge zu capylink oder seinen Abhängigkeiten sollten in Form von Pull
 Requests auf GitHub erfolgen. Jeder Pull Request wird von einem Hauptakteur
 (jemand mit der Erlaubnis, Korrekturen einzubringen) geprüft und entweder in den
 Hauptbaum eingefügt oder Feedback für notwendige Änderungen gegeben. Alle
@@ -31,10 +31,7 @@ werden, dass Beiträge zum gleichen Thema doppelt bearbeitet werden.
   ggf. Ihr Arbeitgeber) mit den Bedingungen der [Projektlizenz](../LICENCE)
   einverstanden sind. In Git ist dies die Option `-s` für `git commit`.
 
-- Wenn Ihr Patch nicht begutachtet wird oder Sie eine bestimmte Person zur
-  Begutachtung benötigen, können Sie einem Gutachter mit @ antworten und um eine
-  Begutachtung des Pull Requests oder einen Kommentar bitten. Sie können auch
-  per [E-Mail](mailto:info@rustdesk.com) um eine Begutachtung bitten.
+- Bitte bitten Sie im Pull Request dieses Repositorys um eine Überprüfung.
 
 - Fügen Sie Tests hinzu, die sich auf den behobenen Fehler oder die neue
   Funktion beziehen.
@@ -43,8 +40,8 @@ Spezifische Git-Anweisungen finden Sie im [GitHub-Workflow](https://github.com/s
 
 ## Verhalten
 
-https://github.com/rustdesk/rustdesk/blob/master/docs/CODE_OF_CONDUCT.md
+https://github.com/atishoo/rustdesk/blob/ultrapro/docs/CODE_OF_CONDUCT.md
 
 ## Kommunikation
 
-RustDesk-Mitarbeiter arbeiten häufig im [Discord](https://discord.gg/nDceKgxnkV).
+Bitte verwenden Sie die Issues und Pull Requests dieses Repositorys für Diskussionen zum Projekt.

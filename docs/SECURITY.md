@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Security Policy
 
 ## Reporting a Vulnerability

@@ -1,11 +1,11 @@
-# Bidrag til RustDesk
+# Bidrag til capylink
 
-RustDesk er åpene for bidrag fra alle. Her er reglene for de som har lyst til å
+capylink er åpene for bidrag fra alle. Her er reglene for de som har lyst til å
 hjelpe oss:
 
 ## Bidrag
 
-Bidrag til RustDesk eller deres avhengigheter burde være i form av GitHub pull requests.
+Bidrag til capylink eller deres avhengigheter burde være i form av GitHub pull requests.
 Hver pull request vill bli sett igjennom av en kjerne bidrager (noen med autoritet til
 å godkjenne endringene) og enten bli sendt til main treet eller respondert med
 tilbakemelding på endringer som er nødvendig. Alle bidrag burde følge dette formate
@@ -29,9 +29,7 @@ Dette er for å hindre duplikat innsats på samme problem.
   i det tilfellet) godkjenner å bli knyttet til vilkårene av [prosjekt lisensen](../LICENCE).
   Ved bruk av git er dette `-s` opsjonen til `git commit`.
 
-- Hvis dine endringer ikke blir sett eller hvis du trenger en spesefik person til
-  å se på dem kan du @-svare en med autoritet til å godkjenne dine endringer.
-  Dette kann gjøres i en pull request, en kommentar eller via epost på [email](mailto:info@rustdesk.com).
+- Be om en gjennomgang i pull requesten i dette repositoriet.
 
 - Legg til tester relevant til en fikset bug eller en ny tilgjengelighet.
 
@@ -39,8 +37,8 @@ For spesefike git instruksjoner, se [GitHub workflow 101](https://github.com/ser
 
 ## Oppførsel
 
-https://github.com/rustdesk/rustdesk/blob/master/docs/CODE_OF_CONDUCT.md
+https://github.com/atishoo/rustdesk/blob/ultrapro/docs/CODE_OF_CONDUCT.md
 
 ## Kommunikasjon
 
-RustDesk bidragere burker [Discord](https://discord.gg/nDceKgxnkV).
+Bruk issues og pull requests i dette repositoriet til diskusjoner om prosjektet.

@@ -1,10 +1,10 @@
-# Współtworzenie RustDesk
+# Współtworzenie capylink
 
-RustDesk z zadowoleniem przyjmuje wkład od każdego. Oto wytyczne, jeśli chcesz nam pomóc:
+capylink z zadowoleniem przyjmuje wkład od każdego. Oto wytyczne, jeśli chcesz nam pomóc:
 
 ## Współtwórcy
 
-Contributions to RustDesk or its dependencies should be made in the form of GitHub
+Contributions to capylink or its dependencies should be made in the form of GitHub
 pull requests. Each pull request will be reviewed by a core contributor
 (someone with permission to land patches) and either landed in the main tree or
 given feedback for changes that would be required. All contributions should
@@ -28,9 +28,7 @@ efforts from contributors on the same issue.
   your employer if applicable) agree to be bound by the terms of the
   [project license](../LICENCE). In git, this is the `-s` option to `git commit`
 
-- If your patch is not getting reviewed or you need a specific person to review
-  it, you can @-reply a reviewer asking for a review in the pull request or a
-  comment, or you can ask for a review via [email](mailto:info@rustdesk.com).
+- Poproś o przegląd w pull requeście w tym repozytorium.
 
 - Add tests relevant to the fixed bug or new feature.
 
@@ -42,4 +40,4 @@ For specific git instructions, see [GitHub workflow 101](https://github.com/serv
 
 ## Komunikacja
 
-RustDesk contributors frequent the [Discord](https://discord.gg/nDceKgxnkV).
+Do dyskusji o projekcie używaj zgłoszeń i pull requestów w tym repozytorium.

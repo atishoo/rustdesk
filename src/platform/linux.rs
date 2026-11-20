@@ -114,7 +114,7 @@ lazy_static::lazy_static! {
             log::warn!("Not running as root, SUDO_E_PRESERVES_ENV check skipped");
             false
         } else {
-            let key = format!("__RUSTDESK_SUDO_E_TEST_{}", std::process::id());
+            let key = format!("__CAPYLINK_SUDO_E_TEST_{}", std::process::id());
             let val = "1";
             let expected = format!("{key}={val}");
             Command::new("sudo")
@@ -407,7 +407,7 @@ pub fn is_login_screen_wayland() -> bool {
 /// does, so the login gate does not refuse a greeter the service serves over X11.
 #[cfg(feature = "drm")]
 fn is_wayland_tty_greeter(sid: &str, uid: &str) -> bool {
-    std::env::var("RUSTDESK_FORCED_DISPLAY_SERVER").as_deref() != Ok(DISPLAY_SERVER_X11)
+    std::env::var("CAPYLINK_FORCED_DISPLAY_SERVER").as_deref() != Ok(DISPLAY_SERVER_X11)
         && has_wayland_socket(uid)
         && is_tty_greeter_session(sid)
 }
@@ -486,7 +486,7 @@ mod tty_greeter_tests {
         assert!(!is_tty_greeter_props("Type=tty\nClass=user\n"));
         assert!(!is_tty_greeter_props("Type=wayland\nClass=greeter\n"));
 
-        let dir = std::env::temp_dir().join(format!("rustdesk-tty-greeter-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("capylink-tty-greeter-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("wayland-1.lock"), b"").unwrap();
@@ -500,13 +500,13 @@ mod tty_greeter_tests {
     }
 }
 
-/// An explicit `RUSTDESK_FORCED_DISPLAY_SERVER` is an operator override, and the root service
+/// An explicit `CAPYLINK_FORCED_DISPLAY_SERVER` is an operator override, and the root service
 /// forwards it to the per-user server on purpose: the greeter correction may only fix an
 /// AUTO-detected answer, never argue with the operator — a half-applied override would leave
 /// `get_display_server()` and the DRM routing gates disagreeing with each other.
 #[cfg(feature = "drm")]
 pub(crate) fn display_server_forced() -> bool {
-    std::env::var("RUSTDESK_FORCED_DISPLAY_SERVER").is_ok()
+    std::env::var("CAPYLINK_FORCED_DISPLAY_SERVER").is_ok()
 }
 
 /// X11 as far as the DRM path is concerned: a Wayland greeter is not, unless the operator
@@ -1054,11 +1054,11 @@ fn try_start_server_(desktop: Option<&Desktop>) -> ResultType<Option<Child>> {
                 envs.push(("DBUS_SESSION_BUS_ADDRESS", desktop.dbus.clone()));
             }
             if let Ok(forced_display_server) =
-                std::env::var("RUSTDESK_FORCED_DISPLAY_SERVER")
+                std::env::var("CAPYLINK_FORCED_DISPLAY_SERVER")
             {
                 if !forced_display_server.is_empty() {
                     envs.push((
-                        "RUSTDESK_FORCED_DISPLAY_SERVER",
+                        "CAPYLINK_FORCED_DISPLAY_SERVER",
                         forced_display_server,
                     ));
                 }
@@ -1150,7 +1150,7 @@ fn set_x11_env(desktop: &Desktop) {
 }
 
 #[inline]
-fn stop_rustdesk_servers() {
+fn stop_capylink_servers() {
     let _ = run_cmds(&format!(
         r##"ps -ef | grep -E '{} +--server' | awk '{{print $2}}' | xargs -r kill -9"##,
         crate::get_app_name().to_lowercase(),
@@ -1220,15 +1220,15 @@ fn should_start_server(
 }
 
 // to-do: stop_server(&mut user_server); may not stop child correctly
-// stop_rustdesk_servers() is just a temp solution here.
+// stop_capylink_servers() is just a temp solution here.
 fn force_stop_server() {
-    stop_rustdesk_servers();
+    stop_capylink_servers();
     sleep_millis(super::SERVICE_INTERVAL);
 }
 
 pub fn start_os_service() {
     check_if_stop_service();
-    stop_rustdesk_servers();
+    stop_capylink_servers();
     start_uinput_service();
 
     std::thread::spawn(|| {
@@ -2325,7 +2325,7 @@ mod desktop {
         fn adopt_wayland_tty_greeter(&mut self) {
             if self.tty_greeter
                 && !self.is_wayland()
-                && std::env::var("RUSTDESK_FORCED_DISPLAY_SERVER").as_deref()
+                && std::env::var("CAPYLINK_FORCED_DISPLAY_SERVER").as_deref()
                     != Ok(DISPLAY_SERVER_X11)
                 && super::has_wayland_socket(&self.uid)
             {
@@ -2993,7 +2993,7 @@ pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
     log::info!("Uninstalling service...");
     let cp = switch_service(true);
     let app_name = crate::get_app_name().to_lowercase();
-    // systemctl kill rustdesk --tray, execute cp first
+    // systemctl kill capylink --tray, execute cp first
     if !run_cmds_privileged(&format!(
         "{cp} systemctl disable {app_name}; systemctl stop {app_name};"
     )) {
@@ -3144,7 +3144,7 @@ pub fn is_selinux_enforcing() -> bool {
 fn get_shortcuts_inhibitor_app_id() -> String {
     if is_flatpak() {
         // In Flatpak, FLATPAK_ID is set automatically by the runtime to the app ID
-        // (e.g., "com.rustdesk.RustDesk"). This is the most reliable source.
+        // (e.g., "com.capylink.capylink"). This is the most reliable source.
         // Fall back to constructing from app name if not available.
         match std::env::var("FLATPAK_ID") {
             Ok(id) if !id.is_empty() => format!("{}.desktop", id),

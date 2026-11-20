@@ -21,13 +21,13 @@ from update_metadata_policy import (
     validate_release_base_url,
 )
 
-APP_NAME = "rustdesk"
+APP_NAME = "capylink"
 SCHEMA_VERSION = 1
 SIGNATURE_ALGORITHM = "ed25519"
-SIGNATURE_CONTEXT = b"RustDesk update metadata v1\n"
+SIGNATURE_CONTEXT = b"capylink update metadata v1\n"
 KEY_ID = "2026-ed25519-main"
-SEED_ENV = "RUSTDESK_UPDATE_ED25519_SEED"
-PUBLIC_KEY_ENV = "RUSTDESK_UPDATE_ED25519_PUBLIC_KEY"
+SEED_ENV = "CAPYLINK_UPDATE_ED25519_SEED"
+PUBLIC_KEY_ENV = "CAPYLINK_UPDATE_ED25519_PUBLIC_KEY"
 
 
 def fail(message):

@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Politica de Securitate
 
 ## Raportarea unei Vulnerabilități

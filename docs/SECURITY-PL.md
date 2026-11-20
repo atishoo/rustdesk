@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Polityka bezpieczeństwa
 
 ## Zgłaszanie podatności

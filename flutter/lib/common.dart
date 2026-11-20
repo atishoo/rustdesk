@@ -742,12 +742,12 @@ Future<void> windowOnTop(int? id) async {
     }
     await windowManager.show();
     await windowManager.focus();
-    await rustDeskWinManager.registerActiveWindow(kWindowMainId);
+    await capyLinkWinManager.registerActiveWindow(kWindowMainId);
   } else {
     WindowController.fromWindowId(id)
       ..focus()
       ..show();
-    rustDeskWinManager.call(WindowType.Main, kWindowEventShow, {"id": id});
+    capyLinkWinManager.call(WindowType.Main, kWindowEventShow, {"id": id});
   }
 }
 
@@ -2026,7 +2026,7 @@ Future<Offset?> _adjustRestoreMainWindowOffset(
 Future<bool> restoreWindowPosition(WindowType type,
     {int? windowId, String? peerId, int? display}) async {
   if (bind
-      .mainGetEnv(key: "DISABLE_RUSTDESK_RESTORE_WINDOW_POSITION")
+      .mainGetEnv(key: "DISABLE_CAPYLINK_RESTORE_WINDOW_POSITION")
       .isNotEmpty) {
     return false;
   }
@@ -2265,17 +2265,17 @@ Uri? _parseConnectionUri(String link) {
   return uri;
 }
 
-bool isRustDeskUri(String uri) =>
+bool isCapyLinkUri(String uri) =>
     uri.startsWith(bind.mainUriPrefixSync()) ||
-    (!isWeb && uri.startsWith('rustdesk://connect-id$_encodedConnectPath'));
+    (!isWeb && uri.startsWith('capylink://connect-id$_encodedConnectPath'));
 
 // uri link handler
 Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
   List<String>? args;
   if (cmdArgs != null && cmdArgs.isNotEmpty) {
     args = cmdArgs;
-    // rustdesk <uri link>
-    if (isRustDeskUri(args[0])) {
+    // capylink <uri link>
+    if (isCapyLinkUri(args[0])) {
       final uri = _parseConnectionUri(args[0]);
       if (uri == null) return false;
       args = await urlLinkToCmdArgs(uri);
@@ -2377,7 +2377,7 @@ Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
     switch (type) {
       case UriLinkType.remoteDesktop:
         Future.delayed(Duration.zero, () {
-          rustDeskWinManager.newRemoteDesktop(id!,
+          capyLinkWinManager.newRemoteDesktop(id!,
               loginMethod: loginMethod,
               password: password,
               switchUuid: switchUuid,
@@ -2388,7 +2388,7 @@ Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
         break;
       case UriLinkType.fileTransfer:
         Future.delayed(Duration.zero, () {
-          rustDeskWinManager.newFileTransfer(id!,
+          capyLinkWinManager.newFileTransfer(id!,
               loginMethod: loginMethod,
               password: password,
               forceRelay: forceRelay);
@@ -2396,7 +2396,7 @@ Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
         break;
       case UriLinkType.viewCamera:
         Future.delayed(Duration.zero, () {
-          rustDeskWinManager.newViewCamera(id!,
+          capyLinkWinManager.newViewCamera(id!,
               loginMethod: loginMethod,
               password: password,
               forceRelay: forceRelay);
@@ -2404,7 +2404,7 @@ Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
         break;
       case UriLinkType.portForward:
         Future.delayed(Duration.zero, () {
-          rustDeskWinManager.newPortForward(id!, false,
+          capyLinkWinManager.newPortForward(id!, false,
               loginMethod: loginMethod,
               password: password,
               forceRelay: forceRelay);
@@ -2412,7 +2412,7 @@ Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
         break;
       case UriLinkType.rdp:
         Future.delayed(Duration.zero, () {
-          rustDeskWinManager.newPortForward(id!, true,
+          capyLinkWinManager.newPortForward(id!, true,
               loginMethod: loginMethod,
               password: password,
               forceRelay: forceRelay);
@@ -2420,7 +2420,7 @@ Future<bool> handleUriLink({List<String>? cmdArgs, String? uriString}) async {
         break;
       case UriLinkType.terminal:
         Future.delayed(Duration.zero, () {
-          rustDeskWinManager.newTerminal(id!,
+          capyLinkWinManager.newTerminal(id!,
               loginMethod: loginMethod,
               password: password,
               forceRelay: forceRelay);
@@ -2464,7 +2464,7 @@ Future<List<String>?> urlLinkToCmdArgs(Uri uri) async {
               'Y';
       if (!allowDeepLinkServerSettings) {
         debugPrint(
-            "Ignore rustdesk://config because $kOptionAllowDeepLinkServerSettings is not enabled.");
+            "Ignore capylink://config because $kOptionAllowDeepLinkServerSettings is not enabled.");
         // Keep the user-facing error generic; detailed rejection reason is in debug logs.
         // Delay toast to avoid missing overlay during cold-start deeplink handling.
         Timer(Duration(seconds: 1), () {
@@ -2485,7 +2485,7 @@ Future<List<String>?> urlLinkToCmdArgs(Uri uri) async {
           bind.mainGetBuildinOption(key: kOptionAllowDeepLinkPassword) == 'Y';
       if (!allowDeepLinkPassword) {
         debugPrint(
-            "Ignore rustdesk://password because $kOptionAllowDeepLinkPassword is not enabled.");
+            "Ignore capylink://password because $kOptionAllowDeepLinkPassword is not enabled.");
         // Keep the user-facing error generic; detailed rejection reason is in debug logs.
         // Delay toast to avoid missing overlay during cold-start deeplink handling.
         Timer(Duration(seconds: 1), () {
@@ -2530,9 +2530,9 @@ Future<List<String>?> urlLinkToCmdArgs(Uri uri) async {
   } else if (uri.authority.length > 2 &&
       (uri.path.length <= 1 ||
           (uri.path == '/r' || uri.path.startsWith('/r@')))) {
-    // rustdesk://<connect-id>
-    // rustdesk://<connect-id>/r
-    // rustdesk://<connect-id>/r@<server>
+    // capylink://<connect-id>
+    // capylink://<connect-id>/r
+    // capylink://<connect-id>/r@<server>
     command = '--connect';
     id = uri.authority;
     if (uri.path.length > 1) {
@@ -2714,35 +2714,35 @@ connectMainDesktop(String id,
     bool? isSharedPassword,
     String loginMethod = ''}) async {
   if (isFileTransfer) {
-    await rustDeskWinManager.newFileTransfer(id,
+    await capyLinkWinManager.newFileTransfer(id,
         loginMethod: loginMethod,
         password: password,
         isSharedPassword: isSharedPassword,
         connToken: connToken,
         forceRelay: forceRelay);
   } else if (isViewCamera) {
-    await rustDeskWinManager.newViewCamera(id,
+    await capyLinkWinManager.newViewCamera(id,
         loginMethod: loginMethod,
         password: password,
         isSharedPassword: isSharedPassword,
         connToken: connToken,
         forceRelay: forceRelay);
   } else if (isTcpTunneling || isRDP) {
-    await rustDeskWinManager.newPortForward(id, isRDP,
+    await capyLinkWinManager.newPortForward(id, isRDP,
         loginMethod: loginMethod,
         password: password,
         isSharedPassword: isSharedPassword,
         connToken: connToken,
         forceRelay: forceRelay);
   } else if (isTerminal) {
-    await rustDeskWinManager.newTerminal(id,
+    await capyLinkWinManager.newTerminal(id,
         loginMethod: loginMethod,
         password: password,
         isSharedPassword: isSharedPassword,
         connToken: connToken,
         forceRelay: forceRelay);
   } else {
-    await rustDeskWinManager.newRemoteDesktop(id,
+    await capyLinkWinManager.newRemoteDesktop(id,
         loginMethod: loginMethod,
         password: password,
         isSharedPassword: isSharedPassword,
@@ -2811,7 +2811,7 @@ connect(BuildContext context, String id,
         forceRelay: forceRelay,
       );
     } else {
-      await rustDeskWinManager.call(WindowType.Main, kWindowConnect, {
+      await capyLinkWinManager.call(WindowType.Main, kWindowConnect, {
         'id': id,
         'isFileTransfer': isFileTransfer,
         'isViewCamera': isViewCamera,
@@ -3046,22 +3046,22 @@ bool isRunningInPortableMode() {
 /// Window status callback
 Future<void> onActiveWindowChanged() async {
   print(
-      "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
-  if (rustDeskWinManager.getActiveWindows().isEmpty) {
+      "[MultiWindowHandler] active window changed: ${capyLinkWinManager.getActiveWindows()}");
+  if (capyLinkWinManager.getActiveWindows().isEmpty) {
     // close all sub windows
     try {
       if (isLinux) {
         await Future.wait([
           saveWindowPosition(WindowType.Main),
-          rustDeskWinManager.closeAllSubWindows()
+          capyLinkWinManager.closeAllSubWindows()
         ]);
       } else {
-        await rustDeskWinManager.closeAllSubWindows();
+        await capyLinkWinManager.closeAllSubWindows();
       }
     } catch (err) {
       debugPrintStack(label: "$err");
     } finally {
-      debugPrint("Start closing RustDesk...");
+      debugPrint("Start closing capylink...");
       await windowManager.setPreventClose(false);
       await windowManager.close();
       if (isMacOS) {
@@ -3077,9 +3077,9 @@ Future<void> onActiveWindowChanged() async {
         //
         //```
         // embedder.cc (2725): 'FlutterPlatformMessageCreateResponseHandle' returned 'kInvalidArguments'. Engine handle was invalid.
-        // 2024-11-11 11:41:11.546 RustDesk[90272:2567686] Failed to create a FlutterPlatformMessageResponseHandle (2)
+        // 2024-11-11 11:41:11.546 capylink[90272:2567686] Failed to create a FlutterPlatformMessageResponseHandle (2)
         // embedder.cc (2672): 'FlutterEngineSendPlatformMessage' returned 'kInvalidArguments'. Invalid engine handle.
-        // 2024-11-11 11:41:11.565 RustDesk[90272:2567686] Failed to send message to Flutter engine on channel 'flutter/lifecycle' (2).
+        // 2024-11-11 11:41:11.565 capylink[90272:2567686] Failed to send message to Flutter engine on channel 'flutter/lifecycle' (2).
         // ```
         periodic_immediate(
             Duration(milliseconds: 30), RdPlatformChannel.instance.terminate);
@@ -3150,7 +3150,7 @@ class ServerConfig {
     this.key = key?.trim() ?? '';
   }
 
-  /// decode from shared string (from user shared or rustdesk-server generated)
+  /// decode from shared string (from user shared or capylink-server generated)
   /// also see [encode]
   /// throw when decoding failure
   ServerConfig.decode(String msg) {
@@ -3239,7 +3239,7 @@ int versionCmp(String v1, String v2) {
 }
 
 String getWindowName({WindowType? overrideType}) {
-  final name = bind.mainGetAppNameSync();
+  final name = translate(bind.mainGetAppNameSync());
   switch (overrideType ?? kWindowType) {
     case WindowType.Main:
       return name;
@@ -3278,7 +3278,7 @@ Future<void> updateSystemWindowTheme() async {
 ///
 /// Note: not found a general solution for rust based AVFoundation bingding.
 /// [AVFoundation] crate has compile error.
-const kMacOSPermChannel = MethodChannel("org.rustdesk.rustdesk/host");
+const kMacOSPermChannel = MethodChannel("org.capylink.capylink/host");
 
 enum PermissionAuthorizeType {
   undetermined,
@@ -3556,7 +3556,7 @@ Future<List<Rect>> getScreenListWayland() async {
       screenRectList.add(rect);
     }
   } else {
-    final screenList = await rustDeskWinManager.call(
+    final screenList = await capyLinkWinManager.call(
         WindowType.Main, kWindowGetScreenList, '');
     try {
       for (var screen in jsonDecode(screenList.result) as List<dynamic>) {
@@ -4075,8 +4075,8 @@ Widget loadIcon(double size) {
   return Image.asset('assets/icon.png',
       width: size,
       height: size,
-      errorBuilder: (ctx, error, stackTrace) => SvgPicture.asset(
-            'assets/icon.svg',
+      errorBuilder: (ctx, error, stackTrace) => Image.asset(
+            'assets/capylink-icon.png',
             width: size,
             height: size,
           ));

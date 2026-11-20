@@ -995,7 +995,7 @@ pub async fn stop_main_window_process() {
     #[cfg(windows)]
     {
         // in case above failure, e.g. zombie process
-        if let Err(e) = crate::platform::try_kill_rustdesk_main_window_process() {
+        if let Err(e) = crate::platform::try_kill_capylink_main_window_process() {
             log::error!("kill failed: {}", e);
         }
     }
@@ -1011,7 +1011,7 @@ mod windows_gui_startup_tests {
         System::Threading::WaitForSingleObject,
     };
 
-    const CHILD_TEST: &str = "RUSTDESK_TEST_GUI_IPC_CHILD";
+    const CHILD_TEST: &str = "CAPYLINK_TEST_GUI_IPC_CHILD";
     const CHILD_TIMEOUT_MS: u32 = 10_000;
     // An unmatched test filter exits with zero without running the child assertions.
     const CHILD_SUCCESS_EXIT_CODE: i32 = 42;
@@ -1020,7 +1020,7 @@ mod windows_gui_startup_tests {
     fn windows_gui_survives_ipc_bind_failure() {
         if std::env::var_os(CHILD_TEST).is_some() {
             *hbb_common::config::APP_NAME.write().unwrap() =
-                format!("RustDesk-ipc-test-{}", std::process::id());
+                format!("capylink-ipc-test-{}", std::process::id());
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

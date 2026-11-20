@@ -300,7 +300,7 @@ pub fn clear_wayland_displays_cache() {
 // clears: session inits and hotplug workers clear the cache too, and a bump there tears down
 // every OTHER live capturer on a multi-display session. A capturer records this at build and
 // treats a later bump as "the layout changed under me, rebuild" — the only trigger a rotation
-// has, since it changes neither the CRTC mode nor the framebuffer size (rustdesk#15886).
+// has, since it changes neither the CRTC mode nor the framebuffer size (capylink#15886).
 #[cfg(feature = "drm")]
 static SNAPSHOT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn a_single_rotated_display_swaps_the_uinput_rect() {
-        // Review finding 1 on rustdesk#15889: the single-display branch served the unrotated
+        // Review finding 1 on capylink#15889: the single-display branch served the unrotated
         // mode, so the pointer could not reach ~44% of a portrait screen.
         let mut d = display(0, 0, 1920, 1080, None);
         d.transform = 90;

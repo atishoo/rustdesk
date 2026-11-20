@@ -1,3 +1,5 @@
+> Upstream security policy, retained for reference.
+
 # Sicherheitsrichtlinie
 
 ## Melden einer Schwachstelle

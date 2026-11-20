@@ -22,7 +22,7 @@ sciter.dll
 src/bridge_generated.rs
 src/bridge_generated.io.rs
 *deb
-rustdesk
+capylink
 *.cache
 # appimage
 appimage/AppDir
@@ -60,3 +60,7 @@ flutter/web/
 /third_party/libdrmtap/
 # Local git worktrees
 .worktrees/
+
+!/res/capylink-banner.svg
+
+!/flutter/assets/capylink-icon.png
