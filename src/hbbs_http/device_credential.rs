@@ -146,7 +146,7 @@ fn loopback(url: &Url) -> bool {
     url.host_str().is_some_and(|host| {
         host == "localhost"
             || host
-                .trim_matches(['[', ']'])
+                .trim_matches(&['[', ']'][..])
                 .parse::<IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
     })
@@ -158,9 +158,9 @@ fn endpoint(api: &str) -> ResultType<Url> {
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
-        || !(url.scheme() == "https" || (url.scheme() == "http" && loopback(&url)))
+        || !matches!(url.scheme(), "http" | "https")
     {
-        bail!("Account device credentials require HTTPS or loopback HTTP");
+        bail!("Account device credentials require an HTTP or HTTPS API URL");
     }
     Ok(url)
 }
