@@ -10,6 +10,7 @@ use std::{collections::HashMap, net::SocketAddr};
 #[cfg(feature = "flutter")]
 pub mod account;
 pub mod downloader;
+pub(crate) mod device_credential;
 mod http_client;
 pub mod record_upload;
 pub mod sync;
@@ -146,6 +147,7 @@ pub(crate) fn store_account_token(token: String, deployment: &str) {
         deployment_digest(&[deployment, &token])
     };
     LocalConfig::set_options([(ACCESS_TOKEN, token), (ACCESS_TOKEN_DEPLOYMENT, binding)]);
+    device_credential::CHANGED.notify_one();
 }
 
 pub(crate) async fn account_token_matches(

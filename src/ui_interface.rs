@@ -69,8 +69,13 @@ lazy_static::lazy_static! {
     }));
     static ref ASYNC_JOB_STATUS : Arc<Mutex<String>> = Default::default();
     static ref ASYNC_HTTP_STATUS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    static ref TEMPORARY_PASSWD : Arc<Mutex<String>> = Arc::new(Mutex::new("".to_owned()));
+    static ref IS_REMOTE_MODIFY_ENABLED_BY_CONTROL_PERMISSIONS : Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+}
+
+#[cfg(all(windows, not(feature = "flutter")))]
+lazy_static::lazy_static! {
     // Sciter's Windows startup has no Flutter IPC runtime.
-    #[cfg(all(windows, not(feature = "flutter")))]
     pub(crate) static ref CONNECTION_LINK_RUNTIME: Option<tokio::runtime::Runtime> =
         match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => Some(runtime),
@@ -79,8 +84,6 @@ lazy_static::lazy_static! {
                 None
             }
         };
-    static ref TEMPORARY_PASSWD : Arc<Mutex<String>> = Arc::new(Mutex::new("".to_owned()));
-    static ref IS_REMOTE_MODIFY_ENABLED_BY_CONTROL_PERMISSIONS : Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

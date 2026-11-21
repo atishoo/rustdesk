@@ -130,6 +130,7 @@ pub fn start(args: &mut [String]) {
                         server: current.unwrap_or_else(|| server.to_owned()),
                         key: recent.key,
                         fixed_endpoint: true,
+                        guard_only: false,
                     });
                     id
                 } else {
@@ -139,6 +140,7 @@ pub fn start(args: &mut [String]) {
                             server: recent.endpoint,
                             key: recent.key,
                             fixed_endpoint: true,
+                            guard_only: false,
                         });
                     }
                     target

@@ -459,6 +459,9 @@ pub(crate) struct ExpectedRendezvous {
     pub(crate) key: String,
     #[serde(default)]
     pub(crate) fixed_endpoint: bool,
+    // A remembered native route does not change the signalling authentication mode.
+    #[serde(default)]
+    pub(crate) guard_only: bool,
 }
 
 impl ExpectedRendezvous {
@@ -662,16 +665,20 @@ pub struct RendezvousFeedback {
 
 impl RendezvousFeedback {
     pub(crate) fn password_scope(&self) -> Option<String> {
-        if self.server.is_empty() {
-            return None;
-        }
-        let endpoint = rendezvous_endpoint_identity(&self.server);
-        let mut digest = Sha256::new();
-        digest.update((endpoint.len() as u64).to_le_bytes());
-        digest.update(endpoint);
-        digest.update(&self.key);
-        Some(hex::encode(digest.finalize()))
+        password_scope(&self.server, &self.key)
     }
+}
+
+pub(crate) fn password_scope(server: &str, key: &str) -> Option<String> {
+    if server.is_empty() {
+        return None;
+    }
+    let endpoint = rendezvous_endpoint_identity(server);
+    let mut digest = Sha256::new();
+    digest.update((endpoint.len() as u64).to_le_bytes());
+    digest.update(endpoint);
+    digest.update(key);
+    Some(hex::encode(digest.finalize()))
 }
 
 impl Client {
@@ -812,6 +819,7 @@ impl Client {
                 lch.inherited_rendezvous.clone(),
             )
         };
+        let guard_only = expected_rendezvous.as_ref().is_some_and(|expected| expected.guard_only);
         if expected_rendezvous.is_some()
             && attached_server
                 .as_ref()
@@ -888,7 +896,7 @@ impl Client {
         let (peer, other_server, key, token) = if let Some((peer, server, attached_key)) =
             attached_server.as_ref()
         {
-            let token = if server != PUBLIC_SERVER
+            let token = if !guard_only && server != PUBLIC_SERVER
                 && pinned_endpoint
                     .as_deref()
                     .is_some_and(|endpoint| endpoint.starts_with("wss://"))
@@ -913,7 +921,7 @@ impl Client {
         } else {
             key
         };
-        let pinned_rendezvous = match pinned_endpoint.as_deref() {
+        let pinned_rendezvous = match pinned_endpoint.as_deref().filter(|_| !guard_only) {
             Some(endpoint) if endpoint.starts_with("wss://") => Some(PinnedRendezvous::VerifiedWss),
             Some(endpoint) if is_ws_endpoint(endpoint) => {
                 Some(PinnedRendezvous::AnonymousWebSocket)
@@ -1290,6 +1298,8 @@ impl Client {
         // Wrap the offerer so any early return below (?/bail) or cancellation of this future by
         // the outer select_ok closes its pc instead of leaking it in SESSIONS. Disarmed via
         // into_inner() once the stream is adopted into a connection attempt.
+        let route_guard = interface.get_lch().read().unwrap().expected_rendezvous.clone()
+            .filter(|expected| expected.guard_only);
         let mut webrtc_offerer = webrtc_offerer.map(OffererGuard::new);
         let mut start = Instant::now();
         let mut connected_endpoint = rendezvous_server.clone();
@@ -1452,6 +1462,11 @@ impl Client {
                 }
                 hbb_common::sleep(0.001).await;
             }
+        }
+        if route_guard.as_ref().is_some_and(|expected| {
+            expected.key != key || !same_rendezvous_endpoint(&expected.server, &connected_endpoint)
+        }) {
+            bail!("The connected ID server no longer matches this session");
         }
         // Stop UDP NAT test task if still running
         stop_udp_tx.map(|tx| tx.send(()));
@@ -3463,6 +3478,7 @@ impl VideoHandler {
 enum PasswordSource {
     PersonalAb(Vec<u8>),
     SharedAb(String),
+    AccountCredential,
     Undefined,
 }
 
@@ -4434,6 +4450,7 @@ impl LoginConfigHandler {
         let hash = self.hash.clone();
         let candidate: [u8; 32] = Sha256::digest(password).into();
         let accepted_password = !password.is_empty()
+            && !matches!(self.password_source, PasswordSource::AccountCredential)
             && self.password_scope == trust.password_scope
             && trust.password_attempt == Some(candidate)
             && !self.skips_saved_password();
@@ -4703,12 +4720,17 @@ impl LoginConfigHandler {
     }
 
     pub fn get_conn_token(&self, connected: bool) -> Option<String> {
-        let has_password = !self.password.is_empty();
+        let password = if matches!(self.password_source, PasswordSource::AccountCredential) {
+            Vec::new()
+        } else {
+            self.password.clone()
+        };
+        let has_password = !password.is_empty();
         if !has_password && self.expected_rendezvous.is_none() {
             return None;
         }
         serde_json::to_string(&ConnToken {
-            password: self.password.clone(),
+            password,
             password_source: if has_password {
                 self.password_source.clone()
             } else {
@@ -5423,6 +5445,10 @@ pub async fn handle_hash(
     trust.password_attempt = None;
     {
         let mut login = lc.write().unwrap();
+        if matches!(login.password_source, PasswordSource::AccountCredential) {
+            login.password.clear();
+            login.password_source = PasswordSource::Undefined;
+        }
         login.use_password_scope(trust.password_scope.as_deref());
         login.hash = hash.clone();
     }
@@ -5513,6 +5539,35 @@ pub async fn handle_hash(
             let res = hasher.finalize();
             password = res[..].into();
             lc.write().unwrap().password_source = PasswordSource::SharedAb(p); // reuse SharedAb here
+        }
+    }
+
+    if password.is_empty() && peer.is_secured() && !lc.read().unwrap().skips_saved_password() {
+        let (id, target, session_id) = {
+            let login = lc.read().unwrap();
+            (
+                login.other_server.as_ref().map(|(id, _, _)| id.clone()).unwrap_or_else(|| login.id.clone()),
+                login.id.clone(),
+                login.session_id,
+            )
+        };
+        if let Some(key) = trust.peer_public_key() {
+            if let Some((credential, mut route)) = crate::hbbs_http::device_credential::resolve(
+                &id, &hash.salt, key, trust.password_scope.as_deref(),
+            ).await {
+                let mut login = lc.write().unwrap();
+                if login.id == target && login.session_id == session_id
+                    && login.password_scope == trust.password_scope && !login.skips_saved_password()
+                    && login.password.is_empty()
+                {
+                    password = credential;
+                    login.password_source = PasswordSource::AccountCredential;
+                    if login.expected_rendezvous.is_none() {
+                        route.guard_only = true;
+                        login.expected_rendezvous = Some(route);
+                    }
+                }
+            }
         }
     }
 

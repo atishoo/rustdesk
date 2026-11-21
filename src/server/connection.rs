@@ -315,6 +315,7 @@ enum ConnAuditPrimaryAuth {
     TemporaryPassword = 2,
     PermanentPassword = 3,
     SwitchSides = 4,
+    AccountCredential = 5,
 }
 
 impl ConnAuditPrimaryAuth {
@@ -1904,6 +1905,13 @@ impl Connection {
         if !self.check_trusted_device().await {
             return false;
         }
+        if self.conn_audit_primary_auth == ConnAuditPrimaryAuth::AccountCredential
+            && !crate::hbbs_http::device_credential::host_password()
+                .is_some_and(|password| self.stream.is_secured() && self.verify_h1(&password))
+        {
+            self.send_login_error(crate::client::LOGIN_MSG_PASSWORD_WRONG).await;
+            return false;
+        }
         self.lr.trusted_device_v2_token.clear();
         self.authorized = true;
         self.unauthorized_id = None;
@@ -2619,6 +2627,12 @@ impl Connection {
     }
 
     fn validate_password(&mut self, allow_permanent_password: bool) -> bool {
+        if let Some(password) = crate::hbbs_http::device_credential::host_password() {
+            if self.stream.is_secured() && self.verify_h1(&password) {
+                self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::AccountCredential);
+                return true;
+            }
+        }
         if password::temporary_enabled() {
             let password = password::temporary_password();
             if self.validate_password_plain(&password) {
@@ -3042,6 +3056,7 @@ impl Connection {
 
             if (password::approve_mode() == ApproveMode::Click && !allow_logon_screen_password)
                 || password::approve_mode() == ApproveMode::Both && !password::has_valid_password()
+                    && crate::hbbs_http::device_credential::host_password().is_none()
             {
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 if should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {

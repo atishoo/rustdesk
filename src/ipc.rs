@@ -1014,6 +1014,11 @@ async fn handle(data: Data, stream: &mut Connection) {
                 allow_err!(stream.send(&Data::Config((name, value))).await);
             }
             Some(value) => {
+                if matches!(name.as_str(), "account-credential-prepare" | "account-credential-confirm" | "account-credential-clear") {
+                    let result = crate::hbbs_http::device_credential::ipc_request(&name, &value);
+                    allow_err!(stream.send(&Data::Config((name, result))).await);
+                    return;
+                }
                 let mut updated = true;
                 if name == "id" {
                     // An empty id would wipe the local id and unconfirm the key (cf. #15626).

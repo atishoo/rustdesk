@@ -1890,11 +1890,20 @@ pub fn start_global_event_stream(s: StreamSink<String>, app_type: String) -> Res
             );
         }
     }
+    drop(lock);
+    #[cfg(not(target_os = "ios"))]
+    if app_type_values[0] == APP_TYPE_MAIN {
+        async_tasks::start_device_credential_sync();
+        crate::hbbs_http::device_credential::CHANGED.notify_one();
+    }
     Ok(())
 }
 
 pub fn stop_global_event_stream(app_type: String) {
     let _ = GLOBAL_EVENT_STREAM.write().unwrap().remove(&app_type);
+    if app_type == APP_TYPE_MAIN {
+        crate::hbbs_http::device_credential::CHANGED.notify_one();
+    }
 }
 
 #[inline]
@@ -2436,6 +2445,14 @@ pub(super) mod async_tasks {
     #[allow(dead_code)]
     pub fn stop_flutter_async_runner() {
         let _ = RUNNER.lock().unwrap().take();
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    pub fn start_device_credential_sync() {
+        static STARTED: std::sync::Once = std::sync::Once::new();
+        if let Some((handle, _)) = RUNNER.lock().unwrap().as_ref() {
+            STARTED.call_once(|| { handle.spawn(crate::hbbs_http::device_credential::run()); });
+        }
     }
 
     pub fn resolve_link_route<F: Future + Send + 'static>(future: F) -> Option<F::Output>

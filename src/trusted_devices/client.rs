@@ -21,6 +21,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) fn peer_public_key(&self) -> Option<&[u8]> {
+        self.credentials.as_ref()?.issuer.public_key.as_ref().map(|key| key.as_slice())
+    }
+
     pub async fn respond(
         &mut self,
         response: LoginResponse,
