@@ -42,6 +42,11 @@ lazy_static::lazy_static! {
 
 fn initialize(app_dir: &str, custom_client_config: &str) {
     flutter::async_tasks::start_flutter_async_runner();
+    #[cfg(not(target_os = "ios"))]
+    {
+        flutter::async_tasks::start_device_credential_sync();
+        crate::hbbs_http::device_credential::CHANGED.notify_one();
+    }
     // `APP_DIR` is set in `main_get_data_dir_ios()` on iOS.
     #[cfg(not(target_os = "ios"))]
     {
