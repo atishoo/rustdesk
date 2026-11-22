@@ -1814,6 +1814,7 @@ impl Client {
                                     pinned_rendezvous,
                                     !signed_id_pk.is_empty(),
                                     &key,
+                                    &token,
                                     conn_type,
                                     &interface.get_switch_code(),
                                 )
@@ -1982,6 +1983,7 @@ impl Client {
                 my_nat_type,
                 is_local,
                 &key,
+                &token,
                 conn_type,
                 interface,
                 udp.0,
@@ -2017,6 +2019,7 @@ impl Client {
         my_nat_type: i32,
         is_local: bool,
         key: &str,
+        token: &str,
         conn_type: ConnType,
         interface: impl Interface,
         udp_socket_nat: Option<Arc<UdpSocket>>,
@@ -2167,6 +2170,7 @@ impl Client {
                     pinned_rendezvous,
                     !signed_id_pk.is_empty(),
                     key,
+                    &token,
                     conn_type,
                     &switch_code,
                 )
@@ -2215,6 +2219,7 @@ impl Client {
                     pinned_rendezvous,
                     !signed_id_pk.is_empty(),
                     key,
+                    &token,
                     conn_type,
                     &interface.get_switch_code(),
                 )
@@ -2440,6 +2445,7 @@ impl Client {
         pinned_rendezvous: Option<PinnedRendezvous>,
         secure: bool,
         key: &str,
+        token: &str,
         conn_type: ConnType,
         switch_code: &str,
     ) -> ResultType<Stream> {
@@ -2452,6 +2458,9 @@ impl Client {
         let mut succeed = false;
         let mut uuid = "".to_owned();
         let mut ipv4 = true;
+        let relay_token = matches!(pinned_rendezvous, Some(PinnedRendezvous::VerifiedWss))
+            .then_some(token)
+            .unwrap_or("");
 
         for i in 1..=3 {
             // use different socket due to current hbbs implementation requiring different nat address for each attempt
@@ -2479,6 +2488,7 @@ impl Client {
                 relay_server: relay_server.clone(),
                 secure,
                 switch_code: switch_code.to_owned(),
+                token: relay_token.to_owned(),
                 ..Default::default()
             });
             socket.send(&msg_out).await?;
