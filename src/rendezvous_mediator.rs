@@ -310,6 +310,11 @@ impl RendezvousMediator {
     }
 
     pub async fn start_all() {
+        #[cfg(all(
+            feature = "flutter",
+            not(any(target_os = "android", target_os = "ios"))
+        ))]
+        crate::hbbs_http::address_book::start();
         crate::test_nat_type();
         if config::is_outgoing_only() {
             loop {

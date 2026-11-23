@@ -1367,6 +1367,19 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 pub fn main_set_local_option(key: String, value: String, login_deployment: Option<String>) {
     if key == "access_token" {
         crate::hbbs_http::store_account_token(value, login_deployment.as_deref().unwrap_or(""));
+        #[cfg(not(target_os = "ios"))]
+        {
+            let result = flutter::async_tasks::resolve_link_route(
+                crate::hbbs_http::device_credential::sync_account(true),
+            );
+            if !matches!(&result, Some(Ok(()))) {
+                hbb_common::throttled_log!(
+                    crate::common::API_LOG_INTERVAL,
+                    warn,
+                    "Account credential synchronization failed: {result:?}"
+                );
+            }
+        }
         return;
     }
     let is_texture_render_key = key.eq(keys::OPTION_TEXTURE_RENDER);
@@ -1554,8 +1567,16 @@ pub fn main_get_new_stored_peers() -> String {
     serde_json::to_string(&peers).unwrap_or_default()
 }
 
-pub fn main_forget_password(id: String) {
-    forget_password(id)
+pub fn main_forget_password(id: String) -> hbb_common::anyhow::Result<()> {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    return flutter::async_tasks::resolve_link_route(
+        crate::hbbs_http::address_book::forget_password(id),
+    )
+    .ok_or_else(|| hbb_common::anyhow::anyhow!("Flutter background tasks are not running"))?;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        forget_password(id)
+    }
 }
 
 pub fn main_peer_has_password(id: String) -> bool {
@@ -2089,6 +2110,8 @@ pub fn main_start_dbus_server() {
 }
 
 pub fn main_save_ab(json: String) {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    crate::hbbs_http::address_book::configure(&json);
     if json.len() > 1024 {
         std::thread::spawn(|| {
             config::Ab::store(json);

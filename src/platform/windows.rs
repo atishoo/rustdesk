@@ -103,6 +103,120 @@ mod installer_shell;
 mod verified_update;
 mod msi_registry;
 pub(crate) use acl::current_process_user_sid_string;
+
+fn account_sid_string(sid: windows::Win32::Security::PSID) -> ResultType<String> {
+    use windows::{
+        core::PWSTR,
+        Win32::{
+            Foundation::{LocalFree, HLOCAL},
+            Security::Authorization::ConvertSidToStringSidW,
+        },
+    };
+    if sid.0.is_null() {
+        bail!("Account user SID is unavailable");
+    }
+    let mut text = PWSTR::null();
+    unsafe {
+        ConvertSidToStringSidW(sid, &mut text)?;
+    }
+    if text.is_null() {
+        bail!("Account user SID string is unavailable");
+    }
+    let result = unsafe { text.to_string() }.map_err(|error| anyhow!(error));
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(text.0 as _)));
+    }
+    result
+}
+
+pub(crate) fn account_authorization_user(peer_pid: Option<u32>) -> ResultType<String> {
+    let mut process = WinHANDLE::default();
+    let mut token = WinHANDLE::default();
+    let result = (|| -> ResultType<String> {
+        if let Some(pid) = peer_pid {
+            unsafe {
+                process = WinOpenProcess(WIN_PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?;
+                WinOpenProcessToken(process, WIN_TOKEN_QUERY, &mut token)?;
+            }
+        } else if !is_process_running_as_system(std::process::id())? {
+            let sid = current_process_user_sid_string()?;
+            if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20") {
+                bail!("A service identity cannot authorize an account");
+            }
+            return Ok(sid);
+        } else {
+            let session = get_current_process_session_id()
+                .ok_or_else(|| anyhow!("Background account session is unavailable"))?;
+            let mut raw_token = std::ptr::null_mut();
+            let mut token_pid = 0;
+            if unsafe { GetSessionUserTokenWin(&mut raw_token, session, TRUE, &mut token_pid) }
+                == FALSE
+            {
+                bail!("Interactive account user is unavailable");
+            }
+            token = WinHANDLE(raw_token as _);
+        }
+        let buffer = unsafe { read_token_user_buffer(token, "account authorization")? };
+        let user = unsafe { std::ptr::read_unaligned(buffer.as_ptr() as *const TOKEN_USER) };
+        let sid = account_sid_string(user.User.Sid)?;
+        if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20") {
+            bail!("A service identity cannot authorize an account");
+        }
+        Ok(sid)
+    })();
+    unsafe {
+        if !token.is_invalid() {
+            let _ = WinCloseHandle(token);
+        }
+        if !process.is_invalid() {
+            let _ = WinCloseHandle(process);
+        }
+    }
+    result
+}
+
+pub(crate) fn account_authorization_file_owner(path: &Path) -> ResultType<String> {
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{LocalFree, HLOCAL},
+            Security::{
+                Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
+                OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+            },
+        },
+    };
+    let mut owner = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    use std::os::windows::ffi::OsStrExt;
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            PCWSTR(path.as_ptr()),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            &mut descriptor,
+        )
+    };
+    let result = if status.0 == 0 {
+        account_sid_string(owner)
+    } else {
+        Err(anyhow!(
+            "Account configuration owner could not be queried: {}",
+            status.0
+        ))
+    };
+    if !descriptor.0.is_null() {
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        }
+    }
+    result
+}
 pub use acl::{
     set_path_permission, set_path_permission_for_portable_service_shmem_dir,
     set_path_permission_for_portable_service_shmem_file,

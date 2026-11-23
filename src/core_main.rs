@@ -557,7 +557,6 @@ pub fn core_main() -> Option<CoreMainAction> {
                     let address_book_alias = get_value("--address_book_alias");
                     let address_book_password = get_value("--address_book_password");
                     let address_book_note = get_value("--address_book_note");
-                    let device_group_name = get_value("--device_group_name");
                     let note = get_value("--note");
                     let device_username = get_value("--device_username");
                     let device_name = get_value("--device_name");
@@ -569,7 +568,6 @@ pub fn core_main() -> Option<CoreMainAction> {
                     if user_name.is_none()
                         && strategy_name.is_none()
                         && address_book_name.is_none()
-                        && device_group_name.is_none()
                         && note.is_none()
                         && device_username.is_none()
                         && device_name.is_none()
@@ -579,7 +577,6 @@ pub fn core_main() -> Option<CoreMainAction> {
   --user_name
   --strategy_name
   --address_book_name
-  --device_group_name
   --note
   --device_username
   --device_name"#
@@ -605,9 +602,6 @@ pub fn core_main() -> Option<CoreMainAction> {
                             if let Some(name) = address_book_note {
                                 body["address_book_note"] = serde_json::json!(name);
                             }
-                        }
-                        if let Some(name) = device_group_name {
-                            body["device_group_name"] = serde_json::json!(name);
                         }
                         if let Some(name) = note {
                             body["note"] = serde_json::json!(name);

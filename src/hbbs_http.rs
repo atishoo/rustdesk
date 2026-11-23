@@ -9,6 +9,11 @@ use std::{collections::HashMap, net::SocketAddr};
 
 #[cfg(feature = "flutter")]
 pub mod account;
+#[cfg(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub(crate) mod address_book;
 pub mod downloader;
 pub(crate) mod device_credential;
 mod http_client;

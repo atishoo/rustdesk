@@ -19,7 +19,6 @@ class Peer {
   String rdpUsername;
   bool online = false;
   String loginName; //login username
-  String device_group_name;
   String note;
   bool? sameServer;
 
@@ -43,7 +42,6 @@ class Peer {
         rdpPort = json['rdpPort'] ?? '',
         rdpUsername = json['rdpUsername'] ?? '',
         loginName = json['loginName'] ?? '',
-        device_group_name = json['device_group_name'] ?? '',
         note = json['note'] is String ? json['note'] : '',
         sameServer = json['same_server'];
 
@@ -61,7 +59,6 @@ class Peer {
       "rdpPort": rdpPort,
       "rdpUsername": rdpUsername,
       'loginName': loginName,
-      'device_group_name': device_group_name,
       'note': note,
       'same_server': sameServer,
     };
@@ -89,7 +86,6 @@ class Peer {
       "hostname": hostname,
       "platform": platform,
       "login_name": loginName,
-      "device_group_name": device_group_name,
     };
   }
 
@@ -106,7 +102,6 @@ class Peer {
     required this.rdpPort,
     required this.rdpUsername,
     required this.loginName,
-    required this.device_group_name,
     required this.note,
     this.sameServer,
   });
@@ -125,7 +120,6 @@ class Peer {
           rdpPort: '',
           rdpUsername: '',
           loginName: '',
-          device_group_name: '',
           note: '',
         );
   bool equal(Peer other) {
@@ -140,7 +134,6 @@ class Peer {
         forceAlwaysRelay == other.forceAlwaysRelay &&
         rdpPort == other.rdpPort &&
         rdpUsername == other.rdpUsername &&
-        device_group_name == other.device_group_name &&
         loginName == other.loginName &&
         note == other.note;
   }
@@ -159,7 +152,6 @@ class Peer {
         rdpPort: other.rdpPort,
         rdpUsername: other.rdpUsername,
         loginName: other.loginName,
-        device_group_name: other.device_group_name,
         note: other.note,
         sameServer: other.sameServer);
     peer.online = other.online;

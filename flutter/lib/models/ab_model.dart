@@ -83,7 +83,13 @@ class AbModel {
         name: PeersModelName.addressBook,
         getInitPeers: () => currentAbPeers,
         loadEvent: LoadEvent.addressBook);
-    if (desktopType == DesktopType.main) {
+    if (!isWeb && !isIOS && !isAndroid) {
+      platformFFI.registerEventHandler('address_book_sync', 'address_book_sync',
+          (_) async {
+        await pullAb(force: ForcePullAb.current, quiet: true);
+      });
+    }
+    if (desktopType == DesktopType.main && (isWeb || isIOS || isAndroid)) {
       Timer.periodic(Duration(milliseconds: 500), (timer) async {
         if (_timerCounter++ % 6 == 0) {
           if (!gFFI.userModel.isLogin) return;
@@ -669,6 +675,7 @@ class AbModel {
         key: syncAbOption, value: v ? 'Y' : defaultOptionNo);
     _syncAllFromRecent = true;
     _timerCounter = 0;
+    _saveCache();
   }
 
 // #endregion
@@ -680,6 +687,9 @@ class AbModel {
       Map<String, dynamic> m = <String, dynamic>{
         "access_token": bind.mainGetLocalOption(key: 'access_token'),
         "ab_entries": ab_entries,
+        "current_ab_name": _currentName.value,
+        "sync_enabled":
+            shouldSyncAb() && current.initialized && current.canWrite(),
       };
       bind.mainSaveAb(json: jsonEncode(m));
     } catch (e) {

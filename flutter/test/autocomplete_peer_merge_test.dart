@@ -22,7 +22,6 @@ Peer _peer({
     rdpPort: '',
     rdpUsername: '',
     loginName: '',
-    device_group_name: '',
     note: '',
   );
   peer.online = online;

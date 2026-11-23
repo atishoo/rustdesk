@@ -32,13 +32,9 @@ PERMISSION_IDS = {
     "devices.delete": 0x0204,
     "devices.edit_info": 0x0205,
     "devices.assign_to_user": 0x0206,
-    "devices.change_group": 0x0207,
     "devices.change_strategy": 0x0208,
     "user_groups.view": 0x0301,
     "user_groups.edit": 0x0302,
-    "device_groups.view": 0x0401,
-    "device_groups.edit": 0x0402,
-    "device_groups.change_strategy": 0x0403,
     "audits.view": 0x0501,
     "audits.edit": 0x0502,
     "strategies.view": 0x0601,
@@ -194,7 +190,6 @@ def create_role(
     permissions,
     note=None,
     user_groups=None,
-    device_groups=None,
     unassigned=None,
 ):
     payload = {
@@ -206,8 +201,6 @@ def create_role(
         payload["note"] = note
     if user_groups:
         payload["user_groups"] = user_groups
-    if device_groups:
-        payload["device_groups"] = device_groups
     if unassigned is not None:
         payload["unassigned"] = unassigned
     response = requests.post(
@@ -224,7 +217,6 @@ def update_role(
     note=None,
     permissions=None,
     user_groups=None,
-    device_groups=None,
     unassigned=None,
 ):
     payload = {}
@@ -236,8 +228,6 @@ def update_role(
         payload["permissions"] = permissions
     if user_groups is not None:
         payload["user_groups"] = user_groups
-    if device_groups is not None:
-        payload["device_groups"] = device_groups
     if unassigned is not None:
         payload["unassigned"] = unassigned
     response = requests.put(
@@ -313,10 +303,6 @@ def main():
         "--user-groups",
         help="Comma-separated user group names; use an empty value to clear",
     )
-    parser.add_argument(
-        "--device-groups",
-        help="Comma-separated device group names; use an empty value to clear",
-    )
     parser.add_argument("--users", help="Comma-separated user names or GUIDs")
     unassigned = parser.add_mutually_exclusive_group()
     unassigned.add_argument(
@@ -345,7 +331,6 @@ def main():
             parser.error("--name, --type, and --permissions are required for add")
         if args.type != "group" and (
             args.user_groups is not None
-            or args.device_groups is not None
             or args.unassigned is not None
         ):
             parser.error("group scope options can only be used with --type group")
@@ -357,7 +342,6 @@ def main():
             parse_permissions(args.permissions),
             args.note,
             split_csv(args.user_groups),
-            split_csv(args.device_groups),
             args.unassigned,
         )
         print(f"Success: Created admin role '{args.name}'")
@@ -374,14 +358,12 @@ def main():
             args.note,
             args.permissions,
             args.user_groups,
-            args.device_groups,
             args.unassigned,
         ]
         if all(value is None for value in updates):
             parser.error("at least one update option is required")
         if role.get("type") != ROLE_TYPES["group"] and (
             args.user_groups is not None
-            or args.device_groups is not None
             or args.unassigned is not None
         ):
             parser.error("group scope options can only be used with a group role")
@@ -393,7 +375,6 @@ def main():
             args.note,
             parse_permissions(args.permissions) if args.permissions is not None else None,
             split_csv(args.user_groups),
-            split_csv(args.device_groups),
             args.unassigned,
         )
         print(f"Success: Updated admin role '{role_name}'")

@@ -314,10 +314,8 @@ pub fn peer_has_password(id: String) -> bool {
 }
 
 #[inline]
-pub fn forget_password(id: String) {
-    let mut c = PeerConfig::load(&id);
-    c.password.clear();
-    c.store(&id);
+pub fn forget_password(id: String) -> hbb_common::ResultType<()> {
+    PeerConfig::forget_password(&id)
 }
 
 #[inline]
@@ -1403,6 +1401,23 @@ pub fn get_login_device_info_json() -> String {
     serde_json::to_string(&get_login_device_info()).unwrap_or("{}".to_string())
 }
 
+#[cfg(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+async fn sync_controlling_session_count(
+    connection: &mut ipc::ConnectionTmpl<parity_tokio_ipc::ConnectionClient>,
+    acknowledged: Option<usize>,
+) -> hbb_common::ResultType<()> {
+    let count = crate::flutter::sessions::controlling_session_count();
+    if acknowledged != Some(count) {
+        connection
+            .send(&ipc::Data::ControllingSessionCount(count))
+            .await?;
+    }
+    Ok(())
+}
+
 // notice: avoiding create ipc connection repeatedly,
 // because windows named pipe has serious memory leak issue.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1421,6 +1436,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
     loop {
         if let Ok(mut c) = ipc::connect(1000, "").await {
             let mut timer = crate::capylink_interval(time::interval(time::Duration::from_secs(1)));
+            #[cfg(feature = "flutter")]
+            let mut acknowledged_session_count = None;
             loop {
                 tokio::select! {
                     res = c.next() => {
@@ -1450,6 +1467,10 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 } else if name == "temporary-password" {
                                     *TEMPORARY_PASSWD.lock().unwrap() = value;
                                 }
+                            }
+                            #[cfg(feature = "flutter")]
+                            Ok(Some(ipc::Data::ControllingSessionCount(count))) => {
+                                acknowledged_session_count = Some(count);
                             }
                             #[cfg(feature = "flutter")]
                             Ok(Some(ipc::Data::VideoConnCount(Some(n)))) => {
@@ -1492,9 +1513,20 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                         }
                     }
                     Some(data) = rx.recv() => {
+                        #[cfg(feature = "flutter")]
+                        if matches!(&data, ipc::Data::ControllingSessionCount(_)) {
+                            if !is_cm && sync_controlling_session_count(&mut c, acknowledged_session_count).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         allow_err!(c.send(&data).await);
                     }
                     _ = timer.tick() => {
+                        #[cfg(feature = "flutter")]
+                        if !is_cm && sync_controlling_session_count(&mut c, acknowledged_session_count).await.is_err() {
+                            break;
+                        }
                         c.send(&ipc::Data::OnlineStatus(None)).await.ok();
                         c.send(&ipc::Data::Options(None)).await.ok();
                         c.send(&ipc::Data::Config(("id".to_owned(), None))).await.ok();

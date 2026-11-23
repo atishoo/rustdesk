@@ -13,10 +13,8 @@ import '../utils/http_service.dart' as http;
 class GroupModel {
   final RxBool groupLoading = false.obs;
   final RxString groupLoadError = "".obs;
-  final RxList<DeviceGroupPayload> deviceGroups = RxList.empty(growable: true);
   final RxList<UserPayload> users = RxList.empty(growable: true);
   final RxList<Peer> peers = RxList.empty(growable: true);
-  final RxBool isSelectedDeviceGroup = false.obs;
   final RxString selectedAccessibleItemName = ''.obs;
   final RxString searchAccessibleItemNameText = ''.obs;
   WeakReference<FFI> parent;
@@ -42,7 +40,7 @@ class GroupModel {
 
   final Map<String, VoidCallback> _peerIdUpdateListeners = {};
 
-  bool get emtpy => deviceGroups.isEmpty && users.isEmpty && peers.isEmpty;
+  bool get emtpy => users.isEmpty && peers.isEmpty;
 
   late final Peers peersModel;
 
@@ -118,12 +116,6 @@ class GroupModel {
   }
 
   Future<void> _pull() async {
-    List<DeviceGroupPayload> tmpDeviceGroups = List.empty(growable: true);
-    if (!await _getDeviceGroups(tmpDeviceGroups)) {
-      // old hbbs doesn't support this api
-      // return;
-    }
-    tmpDeviceGroups.sort((a, b) => a.name.compareTo(b.name));
     List<UserPayload> tmpUsers = List.empty(growable: true);
     if (!await _getUsers(tmpUsers)) {
       return;
@@ -133,7 +125,6 @@ class GroupModel {
       return;
     }
     if (!await _pullIsCurrent()) return;
-    deviceGroups.value = tmpDeviceGroups;
     // me first
     var index = tmpUsers
         .indexWhere((user) => user.name == gFFI.userModel.userName.value);
@@ -142,8 +133,7 @@ class GroupModel {
       tmpUsers.insert(0, user);
     }
     users.value = tmpUsers;
-    if (!users.any((u) => u.name == selectedAccessibleItemName.value) &&
-        !deviceGroups.any((d) => d.name == selectedAccessibleItemName.value)) {
+    if (!users.any((u) => u.name == selectedAccessibleItemName.value)) {
       selectedAccessibleItemName.value = '';
     }
     // recover online
@@ -155,65 +145,6 @@ class GroupModel {
         .toList();
     groupLoadError.value = '';
     _callbackPeerUpdate();
-  }
-
-  Future<bool> _getDeviceGroups(
-      List<DeviceGroupPayload> tmpDeviceGroups) async {
-    final (apiServer, accountHeaders) = await getAccountHttpContext();
-    final api = "$apiServer/api/device-group/accessible";
-    try {
-      var uri0 = Uri.parse(api);
-      final pageSize = 100;
-      var total = 0;
-      int current = 0;
-      do {
-        current += 1;
-        var uri = Uri(
-            scheme: uri0.scheme,
-            host: uri0.host,
-            path: uri0.path,
-            port: uri0.port,
-            queryParameters: {
-              'current': current.toString(),
-              'pageSize': pageSize.toString(),
-            });
-        final resp = await http.get(uri,
-            headers: Map<String, String>.of(accountHeaders));
-        _statusCode = resp.statusCode;
-        Map<String, dynamic> json =
-            _jsonDecodeResp(decode_http_response(resp), resp.statusCode);
-        if (json.containsKey('error')) {
-          throw json['error'];
-        }
-        if (resp.statusCode != 200) {
-          throw 'HTTP ${resp.statusCode}';
-        }
-        if (json.containsKey('total')) {
-          if (total == 0) total = json['total'];
-          if (json.containsKey('data')) {
-            final data = json['data'];
-            if (data is List) {
-              for (final user in data) {
-                final u = DeviceGroupPayload.fromJson(user);
-                int index = tmpDeviceGroups.indexWhere((e) => e.name == u.name);
-                if (index < 0) {
-                  tmpDeviceGroups.add(u);
-                } else {
-                  tmpDeviceGroups[index] = u;
-                }
-              }
-            }
-          }
-        }
-      } while (current * pageSize < total);
-      return true;
-    } catch (err) {
-      debugPrint('get accessible device groups: $err');
-      // old hbbs doesn't support this api
-      // groupLoadError.value =
-      //     '${translate('pull_group_failed_tip')}: ${translate(err.toString())}';
-    }
-    return false;
   }
 
   Future<bool> _getUsers(List<UserPayload> tmpUsers) async {
@@ -361,7 +292,6 @@ class GroupModel {
     try {
       final map = (<String, dynamic>{
         "access_token": bind.mainGetLocalOption(key: 'access_token'),
-        "device_groups": deviceGroups.map((e) => e.toGroupCacheJson()).toList(),
         "users": users.map((e) => e.toGroupCacheJson()).toList(),
         'peers': peers.map((e) => e.toGroupCacheJson()).toList()
       });
@@ -389,14 +319,8 @@ class GroupModel {
       }
       final data = jsonDecode(cache);
       if (data == null || data['access_token'] != access_token) return;
-      deviceGroups.clear();
       users.clear();
       peers.clear();
-      if (data['device_groups'] is List) {
-        for (var u in data['device_groups']) {
-          deviceGroups.add(DeviceGroupPayload.fromJson(u));
-        }
-      }
       if (data['users'] is List) {
         for (var u in data['users']) {
           users.add(UserPayload.fromJson(u));
@@ -416,7 +340,6 @@ class GroupModel {
   reset() async {
     initialized = false;
     groupLoadError.value = '';
-    deviceGroups.clear();
     users.clear();
     peers.clear();
     selectedAccessibleItemName.value = '';
@@ -443,7 +366,6 @@ class GroupModel {
     if (errorMessage.toLowerCase().contains('disabled')) {
       users.clear();
       peers.clear();
-      deviceGroups.clear();
     }
   }
 }

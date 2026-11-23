@@ -1,4 +1,5 @@
 use hbb_common::{
+    anyhow::anyhow,
     bail,
     config::{self, Config, LocalConfig},
     password_security::{self, ApproveMode},
@@ -9,7 +10,11 @@ use hbb_common::{
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
+    fs,
+    io::ErrorKind,
     net::IpAddr,
+    path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -20,7 +25,16 @@ const REFRESH: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub(crate) static CHANGED: Notify = Notify::const_new();
-static HOST_LEASE: Mutex<Option<HostLease>> = Mutex::new(None);
+#[cfg(all(feature = "flutter", not(target_os = "ios")))]
+static ACCOUNT_SYNC: tokio::sync::Mutex<
+    Option<crate::ipc::ConnectionTmpl<parity_tokio_ipc::ConnectionClient>>,
+> = tokio::sync::Mutex::const_new(None);
+static HOST_CHANGED: Notify = Notify::const_new();
+static HOST_STATE: Mutex<HostState> = Mutex::new(HostState {
+    account: None,
+    lease: None,
+    loaded: false,
+});
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Credential {
@@ -42,10 +56,31 @@ struct HostIdentity {
 }
 
 struct HostLease {
-    binding: String,
     identity: HostIdentity,
     password: Vec<u8>,
     valid_until: Instant,
+}
+
+struct HostState {
+    account: Option<StoredAccount>,
+    lease: Option<HostLease>,
+    loaded: bool,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredAccount {
+    token: String,
+    binding: String,
+    id: String,
+    uuid: String,
+    local_config: PathBuf,
+    #[cfg(windows)]
+    owner_sid: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct AccountFile {
+    ciphertext: String,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -56,6 +91,167 @@ struct AccountContext {
     route: crate::client::ExpectedRendezvous,
     deployment: String,
     binding: String,
+}
+
+fn account_file() -> PathBuf {
+    Config::file().with_extension("account-credential")
+}
+
+fn local_account_file() -> PathBuf {
+    let mut path = Config::file();
+    let mut name = path.file_stem().unwrap_or_default().to_os_string();
+    name.push("_local");
+    if let Some(extension) = path.extension() {
+        name.push(".");
+        name.push(extension);
+    }
+    path.set_file_name(name);
+    path
+}
+
+fn account_is_confirmed(account: &StoredAccount) -> ResultType<bool> {
+    #[cfg(windows)]
+    {
+        use crate::platform::windows::{
+            account_authorization_file_owner, account_authorization_user,
+        };
+        if account_authorization_user(None)? != account.owner_sid {
+            return Ok(false);
+        }
+        let owner = account_authorization_file_owner(&account.local_config)?;
+        if owner != account.owner_sid && owner != "S-1-5-32-544" {
+            return Ok(false);
+        }
+    }
+    #[cfg(not(windows))]
+    if account.local_config != fs::canonicalize(local_account_file())? {
+        return Ok(false);
+    }
+    // The GUI's persisted account remains authoritative after an IPC failure or process exit.
+    let saved: hbb_common::toml::Value =
+        hbb_common::toml::from_str(&fs::read_to_string(&account.local_config)?)?;
+    let option = |name| {
+        saved
+            .get("options")
+            .and_then(|v| v.get(name))
+            .and_then(|v| v.as_str())
+    };
+    Ok(option(super::ACCESS_TOKEN) == Some(account.token.as_str())
+        && option(super::ACCESS_TOKEN_DEPLOYMENT) == Some(account.binding.as_str()))
+}
+
+fn store_host_account(account: Option<&StoredAccount>) -> ResultType<()> {
+    let Some(account) = account else {
+        return match fs::remove_file(account_file()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        };
+    };
+    let encrypted = password_security::symmetric_crypt(&serde_json::to_vec(account)?, true)
+        .map_err(|_| anyhow!("Could not encrypt background account authorization"))?;
+    config::store_path(
+        account_file(),
+        AccountFile {
+            ciphertext: base64::encode(&encrypted, base64::Variant::Original),
+        },
+    )
+}
+
+fn load_host_account(state: &mut HostState) {
+    if state.loaded {
+        return;
+    }
+    let result = (|| -> ResultType<Option<StoredAccount>> {
+        let value = match fs::read_to_string(account_file()) {
+            Ok(value) => value,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let file: AccountFile = hbb_common::toml::from_str(&value)?;
+        if file.ciphertext.is_empty() {
+            return Ok(None);
+        }
+        let encrypted = base64::decode(&file.ciphertext, base64::Variant::Original)
+            .map_err(|_| anyhow!("Invalid encrypted background account authorization"))?;
+        let plaintext = password_security::symmetric_crypt(&encrypted, false)
+            .map_err(|_| anyhow!("Could not decrypt background account authorization"))?;
+        Ok(Some(serde_json::from_slice(&plaintext)?))
+    })();
+    match result {
+        Ok(account) => {
+            state.account = account;
+            state.loaded = true;
+        }
+        Err(error) => {
+            hbb_common::throttled_log!(
+                crate::common::API_LOG_INTERVAL,
+                warn,
+                "Background account authorization could not be restored: {error}"
+            );
+        }
+    }
+}
+
+fn current_host_account(state: &mut HostState) -> Option<(String, String)> {
+    load_host_account(state);
+    if !state.loaded {
+        return None;
+    }
+    let account = state.account.as_ref()?;
+    let confirmed = match account_is_confirmed(account) {
+        Ok(confirmed) => confirmed,
+        Err(error) => {
+            state.lease = None;
+            hbb_common::throttled_log!(
+                crate::common::API_LOG_INTERVAL,
+                warn,
+                "Background account authorization could not be confirmed: {error}"
+            );
+            return None;
+        }
+    };
+    let id = Config::get_id();
+    let uuid = crate::encode64(hbb_common::get_uuid());
+    if id.is_empty() || uuid.is_empty() {
+        return None;
+    }
+    let (api, _, _, deployment) = super::account_deployment(&Config::get_options());
+    if !confirmed
+        || endpoint(&api).is_err()
+        || super::bound_account_token(account.token.clone(), account.binding.clone(), &deployment)
+            != account.token
+        || account.token.is_empty()
+        || account.id != id
+        || account.uuid != uuid
+    {
+        state.account = None;
+        state.lease = None;
+        if let Err(error) = store_host_account(None) {
+            hbb_common::throttled_log!(
+                crate::common::API_LOG_INTERVAL,
+                warn,
+                "Background account authorization could not be removed: {error}"
+            );
+        }
+        return None;
+    }
+    Some((api, account.token.clone()))
+}
+
+pub(crate) fn host_account() -> Option<(String, String, PathBuf)> {
+    let mut state = HOST_STATE.lock().unwrap();
+    let (api, token) = current_host_account(&mut state)?;
+    Some((api, token, state.account.as_ref()?.local_config.clone()))
+}
+
+fn host_context(state: &mut HostState) -> Option<AccountContext> {
+    let (_, token) = current_host_account(state)?;
+    account_context_for(
+        &Config::get_options(),
+        token,
+        state.account.as_ref()?.binding.clone(),
+    )
 }
 
 fn host_identity() -> Option<HostIdentity> {
@@ -91,52 +287,79 @@ fn host_identity() -> Option<HostIdentity> {
     })
 }
 
-pub(crate) fn ipc_request(command: &str, binding: &str) -> Option<String> {
-    if command == "account-credential-confirm" {
-        let (binding, identity, password): (String, HostIdentity, String) =
-            serde_json::from_str(binding).ok()?;
-        if binding.len() != 64
-            || !binding.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || host_identity().as_ref() != Some(&identity)
-        {
-            return None;
-        }
-        let password = base64::decode(&password, base64::Variant::Original).ok()?;
-        if password.len() != 32 {
-            return None;
-        }
-        *HOST_LEASE.lock().unwrap() = Some(HostLease {
-            binding,
-            identity,
-            password,
-            valid_until: Instant::now() + LEASE,
-        });
-        return Some("Y".to_owned());
-    }
-    if binding.len() != 64 || !binding.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+pub(crate) fn ipc_request(
+    command: &str,
+    value: &str,
+    #[cfg(windows)] peer_pid: Option<u32>,
+) -> Option<String> {
+    if command != "account-credential-sync" {
         return None;
     }
-    match command {
-        "account-credential-prepare" => serde_json::to_string(&host_identity()?).ok(),
-        "account-credential-clear" => {
-            let mut current = HOST_LEASE.lock().unwrap();
-            if current
-                .as_ref()
-                .is_some_and(|lease| lease.binding == binding)
-            {
-                *current = None;
-            }
-            Some("Y".to_owned())
+    #[cfg(windows)]
+    let owner_sid = {
+        let caller = crate::platform::windows::account_authorization_user(Some(peer_pid?)).ok()?;
+        if caller != crate::platform::windows::account_authorization_user(None).ok()? {
+            return None;
         }
-        _ => None,
+        caller
+    };
+    let account = match serde_json::from_str::<Option<(String, String, PathBuf)>>(value).ok()? {
+        Some((token, binding, local_config)) => {
+            let (api, _, _, deployment) = super::account_deployment(&Config::get_options());
+            endpoint(&api).ok()?;
+            let token = super::bound_account_token(token, binding.clone(), &deployment);
+            if token.is_empty() {
+                return None;
+            }
+            let id = Config::get_id();
+            let uuid = crate::encode64(hbb_common::get_uuid());
+            if id.is_empty() || uuid.is_empty() {
+                return None;
+            }
+            let account = StoredAccount {
+                token,
+                binding,
+                id,
+                uuid,
+                local_config: fs::canonicalize(local_config).ok()?,
+                #[cfg(windows)]
+                owner_sid,
+            };
+            if !account_is_confirmed(&account).ok()? {
+                return None;
+            }
+            Some(account)
+        }
+        None => None,
+    };
+    let mut state = HOST_STATE.lock().unwrap();
+    load_host_account(&mut state);
+    if !state.loaded {
+        return None;
     }
+    if state.account != account || account.is_none() {
+        state.lease = None;
+        if let Err(error) = store_host_account(account.as_ref()) {
+            state.account = None;
+            hbb_common::throttled_log!(
+                crate::common::API_LOG_INTERVAL,
+                warn,
+                "Background account authorization could not be saved: {error}"
+            );
+            return None;
+        }
+        state.account = account;
+        HOST_CHANGED.notify_one();
+    }
+    Some("Y".to_owned())
 }
 
 pub(crate) fn host_password() -> Option<Vec<u8>> {
-    let mut current = HOST_LEASE.lock().unwrap();
-    let lease = current.as_ref()?;
+    let mut state = HOST_STATE.lock().unwrap();
+    current_host_account(&mut state)?;
+    let lease = state.lease.as_ref()?;
     if host_identity().as_ref() != Some(&lease.identity) || lease.valid_until <= Instant::now() {
-        *current = None;
+        state.lease = None;
         return None;
     }
     Some(lease.password.clone())
@@ -165,7 +388,7 @@ fn endpoint(api: &str) -> ResultType<Url> {
     Ok(url)
 }
 
-fn http_client(api: &str) -> ResultType<Client> {
+pub(super) fn http_client(api: &str) -> ResultType<Client> {
     let url = endpoint(api)?;
     let mut builder = Client::builder()
         .no_proxy()
@@ -204,10 +427,18 @@ async fn account_context() -> Option<AccountContext> {
     let options = crate::ipc::get_options_async().await;
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let options = Config::get_options();
-    let (api, server, key, deployment) = super::account_deployment(&options);
-    endpoint(&api).ok()?;
     let [token, binding] =
         LocalConfig::get_options([super::ACCESS_TOKEN, super::ACCESS_TOKEN_DEPLOYMENT]);
+    account_context_for(&options, token, binding)
+}
+
+fn account_context_for(
+    options: &HashMap<String, String>,
+    token: String,
+    binding: String,
+) -> Option<AccountContext> {
+    let (api, server, key, deployment) = super::account_deployment(options);
+    endpoint(&api).ok()?;
     let token = super::bound_account_token(token, binding, &deployment);
     if token.is_empty() || server.is_empty() || crate::get_rs_pk(&key).is_none() {
         return None;
@@ -228,25 +459,28 @@ async fn account_context() -> Option<AccountContext> {
     })
 }
 
-async fn daemon_request(command: &str, binding: &str) -> Option<String> {
+async fn daemon_request(
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    connection: &mut crate::ipc::ConnectionTmpl<parity_tokio_ipc::ConnectionClient>,
+    command: &str,
+    binding: &str,
+) -> ResultType<Option<String>> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let mut connection = crate::ipc::connect(1000, "").await.ok()?;
         connection
             .send(&crate::ipc::Data::Config((
                 command.to_owned(),
                 Some(binding.to_owned()),
             )))
-            .await
-            .ok()?;
-        match connection.next_timeout(1000).await.ok()? {
-            Some(crate::ipc::Data::Config((name, result))) if name == command => result,
-            _ => None,
+            .await?;
+        match connection.next_timeout(1000).await? {
+            Some(crate::ipc::Data::Config((name, result))) if name == command => Ok(result),
+            _ => bail!("Invalid account credential synchronization response"),
         }
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        ipc_request(command, binding)
+        Ok(ipc_request(command, binding))
     }
 }
 
@@ -271,7 +505,6 @@ async fn request(
 }
 
 async fn revoke(context: &AccountContext, identity: &HostIdentity) {
-    let _ = daemon_request("account-credential-clear", &context.binding).await;
     let _ = request(
         context,
         Method::DELETE,
@@ -282,18 +515,91 @@ async fn revoke(context: &AccountContext, identity: &HostIdentity) {
 }
 
 #[cfg(all(feature = "flutter", not(target_os = "ios")))]
+pub(crate) async fn sync_account(clear_if_empty: bool) -> ResultType<()> {
+    let mut connection = ACCOUNT_SYNC.lock().await;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if connection.is_none() {
+        *connection = Some(crate::ipc::connect(1000, "").await?);
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let options = crate::ipc::get_options_from_connection(
+        connection.as_mut().ok_or_else(|| {
+            anyhow!("Account credential synchronization connection is unavailable")
+        })?,
+        1000,
+    )
+    .await
+    .map_err(|error| {
+        *connection = None;
+        error
+    })?;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let options = Config::get_options();
+    let [token, binding] =
+        LocalConfig::get_options([super::ACCESS_TOKEN, super::ACCESS_TOKEN_DEPLOYMENT]);
+    let deployment = super::account_deployment(&options).3;
+    let token = super::bound_account_token(token, binding.clone(), &deployment);
+    if token.is_empty() && !clear_if_empty {
+        return Ok(());
+    }
+    let value = serde_json::to_string(&(!token.is_empty()).then_some((
+        token,
+        binding,
+        local_account_file(),
+    )))?;
+    let response = daemon_request(
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        connection.as_mut().ok_or_else(|| {
+            anyhow!("Account credential synchronization connection is unavailable")
+        })?,
+        "account-credential-sync",
+        &value,
+    )
+    .await
+    .map_err(|error| {
+        *connection = None;
+        error
+    })?;
+    if response.as_deref() != Some("Y") {
+        bail!("Background service did not acknowledge account credential synchronization");
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "flutter", not(target_os = "ios")))]
 pub(crate) async fn run() {
     let mut interval = tokio::time::interval(REFRESH);
-    let mut uploaded: Option<(AccountContext, HostIdentity, String)> = None;
     loop {
         tokio::select! { _ = interval.tick() => {}, _ = CHANGED.notified() => {} }
-        let context = if crate::flutter::get_global_event_channels()
+        if !crate::flutter::get_global_event_channels()
             .iter()
             .any(|app| app == crate::flutter::APP_TYPE_MAIN)
         {
-            account_context().await
-        } else {
-            None
+            continue;
+        }
+        if let Err(error) = sync_account(true).await {
+            hbb_common::throttled_log!(
+                crate::common::API_LOG_INTERVAL,
+                warn,
+                "Account credential synchronization failed: {error}"
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "flutter", not(target_os = "ios")))]
+pub(crate) async fn run_host() {
+    let mut interval = tokio::time::interval(REFRESH);
+    let mut uploaded: Option<(AccountContext, HostIdentity, Vec<u8>)> = None;
+    loop {
+        tokio::select! { _ = interval.tick() => {}, _ = HOST_CHANGED.notified() => {} }
+        let context = {
+            let mut state = HOST_STATE.lock().unwrap();
+            let context = host_context(&mut state);
+            if context.is_none() {
+                state.lease = None;
+            }
+            context
         };
         if uploaded
             .as_ref()
@@ -306,47 +612,54 @@ pub(crate) async fn run() {
         let Some(context) = context else {
             continue;
         };
-        let prepared = daemon_request("account-credential-prepare", &context.binding)
-            .await
-            .and_then(|value| serde_json::from_str::<HostIdentity>(&value).ok());
-        let Some(identity) = prepared.filter(|identity| {
+        let Some(identity) = host_identity().filter(|identity| {
             identity.scope == context.scope && identity.deployment == context.deployment
         }) else {
+            HOST_STATE.lock().unwrap().lease = None;
             if let Some((old, identity, _)) = uploaded.take() {
                 revoke(&old, &identity).await;
             }
             continue;
         };
-        let password_hash = match uploaded.as_ref() {
-            Some((old, old_identity, hash)) if old == &context && old_identity == &identity => {
-                hash.clone()
+        let password = match uploaded.as_ref() {
+            Some((old, old_identity, password)) if old == &context && old_identity == &identity => {
+                password.clone()
             }
-            _ => base64::encode(&randombytes::randombytes(32), base64::Variant::Original),
+            _ => randombytes::randombytes(32),
         };
         let credential = Credential {
             id: identity.id.clone(),
             uuid: identity.uuid.clone(),
-            password_hash: password_hash.clone(),
+            password_hash: base64::encode(&password, base64::Variant::Original),
             salt: identity.salt.clone(),
             peer_key: identity.peer_key.clone(),
         };
         let result = request(&context, Method::PUT, "", &credential).await;
-        let accepted = result.is_ok_and(|response| response.status() == StatusCode::NO_CONTENT)
-            && account_context().await.as_ref() == Some(&context);
-        let confirmation =
-            serde_json::to_string(&(&context.binding, &identity, &password_hash)).ok();
-        if accepted
-            && daemon_request(
-                "account-credential-confirm",
-                confirmation.as_deref().unwrap_or_default(),
-            )
-            .await
-            .as_deref()
-                == Some("Y")
-        {
-            uploaded = Some((context, identity, password_hash));
+        let revoked = result
+            .as_ref()
+            .is_ok_and(|response| response.status() == StatusCode::UNAUTHORIZED);
+        let accepted = result.is_ok_and(|response| response.status() == StatusCode::NO_CONTENT);
+        let mut state = HOST_STATE.lock().unwrap();
+        let same_account = host_context(&mut state).as_ref() == Some(&context);
+        if revoked && same_account {
+            state.account = None;
+            if let Err(error) = store_host_account(None) {
+                hbb_common::throttled_log!(
+                    crate::common::API_LOG_INTERVAL,
+                    warn,
+                    "Background account authorization could not be removed: {error}"
+                );
+            }
+        }
+        if accepted && same_account && host_identity().as_ref() == Some(&identity) {
+            state.lease = Some(HostLease {
+                identity: identity.clone(),
+                password: password.clone(),
+                valid_until: Instant::now() + LEASE,
+            });
+            uploaded = Some((context, identity, password));
         } else {
-            let _ = daemon_request("account-credential-clear", &context.binding).await;
+            state.lease = None;
             uploaded = None;
         }
     }

@@ -331,7 +331,7 @@ impl UI {
     }
 
     fn forget_password(&self, id: String) {
-        forget_password(id)
+        allow_err!(forget_password(id));
     }
 
     fn get_peer_option(&self, id: String, name: String) -> String {

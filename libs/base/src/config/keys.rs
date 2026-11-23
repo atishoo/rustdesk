@@ -111,7 +111,6 @@ pub const OPTION_ALLOW_ASK_FOR_NOTE: &str = "allow-ask-for-note";
 // built-in options
 pub const OPTION_DISPLAY_NAME: &str = "display-name";
 pub const OPTION_AVATAR: &str = "avatar";
-pub const OPTION_PRESET_DEVICE_GROUP_NAME: &str = "preset-device-group-name";
 pub const OPTION_PRESET_USERNAME: &str = "preset-user-name";
 pub const OPTION_PRESET_STRATEGY_NAME: &str = "preset-strategy-name";
 pub const OPTION_REMOVE_PRESET_PASSWORD_WARNING: &str = "remove-preset-password-warning";
@@ -340,7 +339,6 @@ pub const KEYS_SETTINGS: &[&str] = &[
 pub const KEYS_BUILDIN_SETTINGS: &[&str] = &[
     OPTION_DISPLAY_NAME,
     OPTION_AVATAR,
-    OPTION_PRESET_DEVICE_GROUP_NAME,
     OPTION_PRESET_USERNAME,
     OPTION_PRESET_STRATEGY_NAME,
     OPTION_REMOVE_PRESET_PASSWORD_WARNING,

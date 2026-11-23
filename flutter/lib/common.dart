@@ -118,7 +118,6 @@ class IconFont {
   static const _family1 = 'Tabbar';
   static const _family2 = 'PeerSearchbar';
   static const _family3 = 'AddressBook';
-  static const _family4 = 'DeviceGroup';
   static const _family5 = 'More';
 
   IconFont._();
@@ -132,10 +131,6 @@ class IconFont {
   static const IconData search = IconData(0xe6a4, fontFamily: _family2);
   static const IconData roundClose = IconData(0xe6ed, fontFamily: _family2);
   static const IconData addressBook = IconData(0xe602, fontFamily: _family3);
-  static const IconData deviceGroupOutline =
-      IconData(0xe623, fontFamily: _family4);
-  static const IconData deviceGroupFill =
-      IconData(0xe748, fontFamily: _family4);
   static const IconData more = IconData(0xe609, fontFamily: _family5);
 }
 

@@ -12,7 +12,6 @@ def view(
     device_name=None,
     user_name=None,
     group_name=None,
-    device_group_name=None,
     offline_days=None,
 ):
     headers = {"Authorization": f"Bearer {token}"}
@@ -22,7 +21,6 @@ def view(
         "device_name": device_name,
         "user_name": user_name,
         "group_name": group_name,
-        "device_group_name": device_group_name,
     }
 
     params = {
@@ -110,7 +108,6 @@ def assign(url, token, guid, id, type, value):
         "ab",
         "strategy_name",
         "user_name",
-        "device_group_name",
         "note",
         "device_username",
         "device_name",
@@ -141,10 +138,9 @@ def main():
     parser.add_argument("--device_name", help="Device name")
     parser.add_argument("--user_name", help="User name")
     parser.add_argument("--group_name", help="User group name")
-    parser.add_argument("--device_group_name", help="Device group name")
     parser.add_argument(
         "--assign_to",
-        help="<type>=<value>, e.g. user_name=mike, strategy_name=test, device_group_name=group1, note=note1, device_username=username1, device_name=name1, ab=ab1, ab=ab1,tag1,alias1,password1,note1"
+        help="<type>=<value>, e.g. user_name=mike, strategy_name=test, note=note1, device_username=username1, device_name=name1, ab=ab1, ab=ab1,tag1,alias1,password1,note1"
     )
     parser.add_argument(
         "--offline_days", type=int, help="Offline duration in days, e.g., 7"
@@ -161,7 +157,6 @@ def main():
         args.device_name,
         args.user_name,
         args.group_name,
-        args.device_group_name,
         args.offline_days,
     )
 

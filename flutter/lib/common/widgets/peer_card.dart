@@ -953,8 +953,18 @@ abstract class BasePeerCard extends StatelessWidget {
         style: style,
       ),
       proc: () async {
+        final [api, token] = await bind.mainAccountRequestContext();
+        try {
+          await bind.mainForgetPassword(id: id);
+          final [currentApi, currentToken] =
+              await bind.mainAccountRequestContext();
+          if (api != currentApi || token != currentToken) return;
+        } catch (_) {
+          BotToast.showText(
+              contentColor: Colors.red, text: translate("Failed"));
+          return;
+        }
         bool succ = await gFFI.abModel.changePersonalHashPassword(id, '');
-        await bind.mainForgetPassword(id: id);
         if (succ) {
           showToast(translate('Successful'));
         } else {

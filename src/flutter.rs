@@ -2343,8 +2343,22 @@ pub mod sessions {
 
     #[inline]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn controlling_session_count() -> usize {
+        SESSIONS.read().unwrap().len()
+    }
+
+    #[inline]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn update_session_count_to_server() {
-        crate::ipc::update_controlling_session_count(SESSIONS.read().unwrap().len()).ok();
+        if let Err(error) =
+            crate::ipc::update_controlling_session_count(controlling_session_count())
+        {
+            hbb_common::throttled_log!(
+                crate::common::API_LOG_INTERVAL,
+                warn,
+                "Controlling session count could not be queued: {error}"
+            );
+        }
     }
 
     #[inline]
@@ -2451,7 +2465,11 @@ pub(super) mod async_tasks {
     pub fn start_device_credential_sync() {
         static STARTED: std::sync::Once = std::sync::Once::new();
         if let Some((handle, _)) = RUNNER.lock().unwrap().as_ref() {
-            STARTED.call_once(|| { handle.spawn(crate::hbbs_http::device_credential::run()); });
+            STARTED.call_once(|| {
+                handle.spawn(crate::hbbs_http::device_credential::run());
+                #[cfg(not(target_os = "android"))]
+                handle.spawn(crate::hbbs_http::address_book::collect());
+            });
         }
     }
 

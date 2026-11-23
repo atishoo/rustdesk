@@ -15,12 +15,17 @@ use hbb_common::{bail, config, log, ResultType};
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         mpsc::{channel, Receiver, Sender},
         Mutex,
     },
     time::{Duration, Instant},
 };
+
+#[cfg(not(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+)))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
@@ -79,6 +84,10 @@ lazy_static::lazy_static! {
     static ref TX_MSG : Mutex<Sender<UpdateMsg>> = Mutex::new(start_auto_update_check());
 }
 
+#[cfg(not(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+)))]
 static CONTROLLING_SESSION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Initial wait after startup before the first update check (30 seconds).
@@ -93,8 +102,12 @@ pub const MIN_INTERVAL: Duration = Duration::from_secs(60 * 10);
 /// Retry interval when an update check fails or a session is active (30 minutes).
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(60 * 30);
 
-pub fn update_controlling_session_count(count: usize) {
-    CONTROLLING_SESSION_COUNT.store(count, Ordering::SeqCst);
+#[cfg(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+pub fn update_controlling_session_count(pid: Option<u32>, count: usize) -> ResultType<()> {
+    controlling_sessions::record(pid, count)
 }
 
 #[allow(dead_code)]
@@ -125,7 +138,310 @@ pub fn has_no_active_conns() -> bool {
 
 #[cfg(any(not(target_os = "windows"), feature = "flutter"))]
 fn has_no_controlling_conns() -> bool {
-    CONTROLLING_SESSION_COUNT.load(Ordering::SeqCst) == 0
+    #[cfg(all(
+        feature = "flutter",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    return controlling_sessions::is_idle();
+    #[cfg(not(all(
+        feature = "flutter",
+        not(any(target_os = "android", target_os = "ios"))
+    )))]
+    {
+        CONTROLLING_SESSION_COUNT.load(Ordering::SeqCst) == 0
+    }
+}
+
+#[cfg(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+mod controlling_sessions {
+    use hbb_common::{
+        anyhow::anyhow,
+        bail,
+        sysinfo::{Pid, Process, ProcessRefreshKind, ProcessStatus, System},
+        ResultType,
+    };
+    use std::{collections::HashMap, path::Path, sync::Mutex};
+
+    struct Count {
+        start_time: u64,
+        sessions: usize,
+    }
+
+    lazy_static::lazy_static! {
+        static ref COUNTS: Mutex<HashMap<Pid, Count>> = Default::default();
+    }
+
+    fn gui_command(command: &[String]) -> bool {
+        let args = &command[command.len().min(1)..];
+        if args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--connect"
+                    | "--play"
+                    | "--file-transfer"
+                    | "--view-camera"
+                    | "--port-forward"
+                    | "--terminal"
+                    | "--terminal-admin"
+                    | "--rdp"
+                    | "--noinstall"
+            )
+        }) {
+            return true;
+        }
+        let argument = args.iter().find(|arg| {
+            !matches!(
+                arg.as_str(),
+                "--no-server" | "--quick_support" | "--elevate" | "--run-as-system"
+            )
+        });
+        match argument.map(String::as_str) {
+            Some(arg) if arg.starts_with("XPC_SERVICE_NAME=") && arg.ends_with("_server") => false,
+            Some(
+                "--server"
+                | "--service"
+                | "--tray"
+                | "--cm"
+                | "--update"
+                | "--install"
+                | "--silent-install"
+                | "--uninstall"
+                | "--remove"
+                | "--install-service"
+                | "--uninstall-service"
+                | "--after-install"
+                | "--before-uninstall"
+                | "--uninstall-cert"
+                | "--install-idd"
+                | "--uninstall-amyuni-idd"
+                | "--install-remote-printer"
+                | "--uninstall-remote-printer"
+                | "--portable-service"
+                | "--option"
+                | "--config"
+                | "--assign"
+                | "--deploy"
+                | "--password"
+                | "--set-unlock-pin"
+                | "--get-id"
+                | "--set-id"
+                | "--import-config"
+                | "--check-hwcodec-config"
+                | "--terminal-helper"
+                | "--whiteboard"
+                | "--version"
+                | "--build-date"
+                | "-gtk-sudo",
+            ) => false,
+            _ => true,
+        }
+    }
+
+    fn gui_process(
+        process: &Process,
+        current: &Process,
+        executable: &Path,
+        registered: bool,
+    ) -> ResultType<bool> {
+        if process.exe().as_os_str().is_empty() {
+            if registered
+                || executable
+                    .file_name()
+                    .is_some_and(|name| name == process.name())
+                || executable
+                    .file_stem()
+                    .is_some_and(|name| name == process.name())
+            {
+                bail!("GUI process executable is unavailable");
+            }
+            return Ok(false);
+        }
+        #[cfg(windows)]
+        let same_executable = process
+            .exe()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&executable.to_string_lossy());
+        #[cfg(not(windows))]
+        let same_executable = process.exe() == executable;
+        if !same_executable {
+            return Ok(false);
+        }
+        #[cfg(unix)]
+        {
+            let uid = current
+                .user_id()
+                .ok_or_else(|| anyhow!("Server process owner is unavailable"))?;
+            if process
+                .user_id()
+                .ok_or_else(|| anyhow!("GUI process owner is unavailable"))?
+                != uid
+            {
+                return Ok(false);
+            }
+        }
+        if process.cmd().is_empty() {
+            bail!("GUI process command is unavailable");
+        }
+        if !registered && !gui_command(process.cmd()) {
+            return Ok(false);
+        }
+        #[cfg(windows)]
+        {
+            let session =
+                crate::platform::windows::get_session_id_of_process(current.pid().as_u32())
+                    .ok_or_else(|| anyhow!("Server process session is unavailable"))?;
+            if crate::platform::windows::get_session_id_of_process(process.pid().as_u32())
+                .ok_or_else(|| anyhow!("GUI process session is unavailable"))?
+                != session
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn exited(pid: Pid) -> bool {
+        #[cfg(unix)]
+        {
+            (unsafe { hbb_common::libc::kill(pid.as_u32() as _, 0) }) != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(hbb_common::libc::ESRCH)
+        }
+        #[cfg(windows)]
+        {
+            use winapi::{
+                shared::winerror::ERROR_INVALID_PARAMETER,
+                um::{
+                    errhandlingapi::GetLastError,
+                    handleapi::CloseHandle,
+                    minwinbase::STILL_ACTIVE,
+                    processthreadsapi::{GetExitCodeProcess, OpenProcess},
+                    winnt::PROCESS_QUERY_LIMITED_INFORMATION,
+                },
+            };
+            unsafe {
+                let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid.as_u32());
+                if handle.is_null() {
+                    return GetLastError() == ERROR_INVALID_PARAMETER;
+                }
+                let mut code = STILL_ACTIVE;
+                let exited = GetExitCodeProcess(handle, &mut code) != 0 && code != STILL_ACTIVE;
+                CloseHandle(handle);
+                exited
+            }
+        }
+    }
+
+    pub(super) fn record(pid: Option<u32>, sessions: usize) -> ResultType<()> {
+        let pid = Pid::from_u32(pid.ok_or_else(|| anyhow!("IPC peer process is unavailable"))?);
+        // Keep a trusted IPC peer busy while process metadata is unavailable.
+        COUNTS
+            .lock()
+            .unwrap()
+            .entry(pid)
+            .and_modify(|count| {
+                if sessions > 0 {
+                    count.sessions = sessions;
+                }
+            })
+            .or_insert(Count {
+                start_time: 0,
+                sessions,
+            });
+        let mut system = System::new();
+        #[cfg(unix)]
+        let refresh = ProcessRefreshKind::new().with_user();
+        #[cfg(windows)]
+        let refresh = ProcessRefreshKind::new();
+        let own_pid = Pid::from_u32(std::process::id());
+        system.refresh_process_specifics(own_pid, refresh);
+        system.refresh_process_specifics(pid, refresh);
+        let current = system
+            .process(own_pid)
+            .ok_or_else(|| anyhow!("Server process is unavailable"))?;
+        let process = system
+            .process(pid)
+            .ok_or_else(|| anyhow!("IPC peer process is unavailable"))?;
+        let executable = std::env::current_exe()?;
+        if !gui_process(process, current, &executable, true)? {
+            COUNTS.lock().unwrap().remove(&pid);
+            return Ok(());
+        }
+        if process.start_time() == 0 {
+            bail!("GUI process start time is unavailable");
+        }
+        COUNTS.lock().unwrap().insert(
+            pid,
+            Count {
+                start_time: process.start_time(),
+                sessions,
+            },
+        );
+        Ok(())
+    }
+
+    fn check_idle() -> ResultType<bool> {
+        let mut system = System::new();
+        #[cfg(unix)]
+        let refresh = ProcessRefreshKind::new().with_user();
+        #[cfg(windows)]
+        let refresh = ProcessRefreshKind::new();
+        system.refresh_processes_specifics(refresh);
+        let current = system
+            .process(Pid::from_u32(std::process::id()))
+            .ok_or_else(|| anyhow!("Process snapshot is unavailable"))?;
+        let executable = std::env::current_exe()?;
+        let mut counts = COUNTS.lock().unwrap();
+        counts.retain(|pid, count| match system.process(*pid) {
+            Some(process) => {
+                !matches!(
+                    process.status(),
+                    ProcessStatus::Zombie | ProcessStatus::Dead
+                ) && (count.start_time == 0
+                    || process.start_time() == 0
+                    || process.start_time() == count.start_time)
+            }
+            None => !exited(*pid),
+        });
+        for pid in counts.keys() {
+            if system.process(*pid).is_none() {
+                bail!("Reported GUI process could not be inspected");
+            }
+        }
+        for (pid, process) in system.processes() {
+            if matches!(
+                process.status(),
+                ProcessStatus::Zombie | ProcessStatus::Dead
+            ) || !gui_process(process, current, &executable, counts.contains_key(pid))?
+            {
+                continue;
+            }
+            if process.start_time() == 0
+                || !counts.get(pid).is_some_and(|count| {
+                    count.start_time == process.start_time() && count.sessions == 0
+                })
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    pub(super) fn is_idle() -> bool {
+        match check_idle() {
+            Ok(idle) => idle,
+            Err(error) => {
+                hbb_common::throttled_log!(
+                    crate::common::API_LOG_INTERVAL,
+                    warn,
+                    "Active controlling sessions could not be verified: {error}"
+                );
+                false
+            }
+        }
+    }
 }
 
 #[cfg(not(any(not(target_os = "windows"), feature = "flutter")))]

@@ -85,6 +85,8 @@ impl InfoUploaded {
 #[cfg(not(any(target_os = "ios")))]
 #[tokio::main(flavor = "current_thread")]
 async fn start_hbbs_sync_async() {
+    #[cfg(feature = "flutter")]
+    tokio::spawn(super::device_credential::run_host());
     let mut interval = crate::capylink_interval(tokio::time::interval_at(
         Instant::now() + TIME_CONN,
         TIME_CONN,
@@ -160,10 +162,6 @@ async fn start_hbbs_sync_async() {
                     let strategy_name = get_builtin_option(keys::OPTION_PRESET_STRATEGY_NAME);
                     if !strategy_name.is_empty() {
                         v[keys::OPTION_PRESET_STRATEGY_NAME] = json!(strategy_name);
-                    }
-                    let device_group_name = get_builtin_option(keys::OPTION_PRESET_DEVICE_GROUP_NAME);
-                    if !device_group_name.is_empty() {
-                        v[keys::OPTION_PRESET_DEVICE_GROUP_NAME] = json!(device_group_name);
                     }
                     let device_username = Config::get_option(keys::OPTION_PRESET_DEVICE_USERNAME);
                     if !device_username.is_empty() {

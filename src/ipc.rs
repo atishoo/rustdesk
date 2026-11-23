@@ -1014,8 +1014,51 @@ async fn handle(data: Data, stream: &mut Connection) {
                 allow_err!(stream.send(&Data::Config((name, value))).await);
             }
             Some(value) => {
-                if matches!(name.as_str(), "account-credential-prepare" | "account-credential-confirm" | "account-credential-clear") {
-                    let result = crate::hbbs_http::device_credential::ipc_request(&name, &value);
+                #[cfg(all(
+                    feature = "flutter",
+                    not(any(target_os = "android", target_os = "ios"))
+                ))]
+                if name == "address-book-sync" {
+                    let result = crate::hbbs_http::address_book::ipc_request(&value);
+                    allow_err!(stream.send(&Data::Config((name, result))).await);
+                    return;
+                }
+                #[cfg(all(
+                    feature = "flutter",
+                    not(any(target_os = "android", target_os = "ios"))
+                ))]
+                if name == "address-book-forget-password" {
+                    let result =
+                        crate::hbbs_http::address_book::forget_password_request(&value).await;
+                    allow_err!(stream.send(&Data::Config((name, result))).await);
+                    return;
+                }
+                if name == "account-credential-sync" {
+                    let result = crate::hbbs_http::device_credential::ipc_request(
+                        &name,
+                        &value,
+                        #[cfg(windows)]
+                        stream.peer_pid(),
+                    );
+                    #[cfg(all(
+                        feature = "flutter",
+                        not(any(target_os = "android", target_os = "ios"))
+                    ))]
+                    let result = if result.as_deref() == Some("Y") && value.trim() == "null" {
+                        match crate::hbbs_http::address_book::clear() {
+                            Ok(()) => result,
+                            Err(error) => {
+                                hbb_common::throttled_log!(
+                                    crate::common::API_LOG_INTERVAL,
+                                    warn,
+                                    "Pending address book synchronization could not be cleared: {error}"
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        result
+                    };
                     allow_err!(stream.send(&Data::Config((name, result))).await);
                     return;
                 }
@@ -1217,20 +1260,35 @@ async fn handle(data: Data, stream: &mut Connection) {
         }
         #[cfg(target_os = "macos")]
         Data::HasNoActiveConns(None) => {
-            allow_err!(
-                stream
-                    .send(&Data::HasNoActiveConns(Some(
-                        crate::updater::has_no_active_conns()
-                    )))
-                    .await
-            );
+            #[cfg(feature = "flutter")]
+            let idle = tokio::task::spawn_blocking(crate::updater::has_no_active_conns)
+                .await
+                .unwrap_or(false);
+            #[cfg(not(feature = "flutter"))]
+            let idle = crate::updater::has_no_active_conns();
+            allow_err!(stream.send(&Data::HasNoActiveConns(Some(idle))).await);
         }
         #[cfg(all(
             feature = "flutter",
             not(any(target_os = "android", target_os = "ios"))
         ))]
         Data::ControllingSessionCount(count) => {
-            crate::updater::update_controlling_session_count(count);
+            let pid = stream.peer_pid();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::updater::update_controlling_session_count(pid, count)
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.into()));
+            match result {
+                Ok(()) => allow_err!(stream.send(&Data::ControllingSessionCount(count)).await),
+                Err(error) => {
+                    hbb_common::throttled_log!(
+                        crate::common::API_LOG_INTERVAL,
+                        warn,
+                        "Controlling session process could not be verified: {error}"
+                    );
+                }
+            }
         }
         #[cfg(target_os = "linux")]
         Data::TerminalSessionCount(_) => {
@@ -2013,12 +2071,19 @@ pub async fn get_rendezvous_server(ms_timeout: u64) -> (String, Vec<String>) {
 
 async fn get_options_(ms_timeout: u64) -> ResultType<HashMap<String, String>> {
     let mut c = connect(ms_timeout, "").await?;
+    get_options_from_connection(&mut c, ms_timeout).await
+}
+
+pub(crate) async fn get_options_from_connection(
+    c: &mut ConnectionTmpl<ConnClient>,
+    ms_timeout: u64,
+) -> ResultType<HashMap<String, String>> {
     c.send(&Data::Options(None)).await?;
     if let Some(Data::Options(Some(value))) = c.next_timeout(ms_timeout).await? {
         Config::set_options(value.clone());
         Ok(value)
     } else {
-        Ok(Config::get_options())
+        bail!("Invalid IPC options response")
     }
 }
 
@@ -2313,10 +2378,11 @@ pub async fn clear_wayland_screencast_restore_token(key: String) -> ResultType<b
     feature = "flutter",
     not(any(target_os = "android", target_os = "ios"))
 ))]
-#[tokio::main(flavor = "current_thread")]
-pub async fn update_controlling_session_count(count: usize) -> ResultType<()> {
-    let mut c = connect(1000, "").await?;
-    c.send(&Data::ControllingSessionCount(count)).await?;
+pub fn update_controlling_session_count(count: usize) -> ResultType<()> {
+    crate::ui_interface::SENDER
+        .lock()
+        .unwrap()
+        .send(Data::ControllingSessionCount(count))?;
     Ok(())
 }
 

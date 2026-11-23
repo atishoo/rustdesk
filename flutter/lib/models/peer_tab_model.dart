@@ -35,7 +35,7 @@ class PeerTabModel with ChangeNotifier {
     Icons.star,
     Icons.explore,
     IconFont.addressBook,
-    IconFont.deviceGroupFill,
+    Icons.people,
   ];
   List<bool> isEnabled = List.from([
     true,

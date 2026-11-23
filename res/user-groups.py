@@ -214,17 +214,19 @@ def add_users(url, token, group_name, user_names):
     return success_msg
 
 
-def parse_rules(s):
+def parse_rules(s, allowed_types):
     if not s:
         return None
     try:
         v = json.loads(s)
-        if isinstance(v, list):
-            # expect list of {"type": number, "name": string}
+        if isinstance(v, list) and all(
+            isinstance(rule, dict) and rule.get("type") in allowed_types
+            for rule in v
+        ):
             return v
     except Exception:
         pass
-    return None
+    raise argparse.ArgumentTypeError("Invalid access rules")
 
 
 def main():
@@ -244,8 +246,8 @@ def main():
     parser.add_argument("--new-name", help="New user group name (for update)")
     parser.add_argument("--note", help="Note")
 
-    parser.add_argument("--accessed-from", help="JSON array: '[{\"type\":0|2,\"name\":\"...\"}]' (0=User Group, 2=User)")
-    parser.add_argument("--access-to", help="JSON array: '[{\"type\":0|1,\"name\":\"...\"}]' (0=User Group, 1=Device Group)")
+    parser.add_argument("--accessed-from", type=lambda s: parse_rules(s, (0, 2)), help="JSON array: '[{\"type\":0|2,\"name\":\"...\"}]' (0=User Group, 2=User)")
+    parser.add_argument("--access-to", type=lambda s: parse_rules(s, (0,)), help="JSON array: '[{\"type\":0,\"name\":\"...\"}]' (0=User Group)")
 
     parser.add_argument("--users", help="Comma separated usernames for add-users")
     
@@ -264,8 +266,8 @@ def main():
             exit(1)
         print(create_group(
             args.url, args.token, args.name, args.note,
-            parse_rules(args.accessed_from),
-            parse_rules(args.access_to)
+            args.accessed_from,
+            args.access_to
         ))
     elif args.command == "update":
         if not args.name:
@@ -273,8 +275,8 @@ def main():
             exit(1)
         print(update_group(
             args.url, args.token, args.name, args.new_name, args.note,
-            parse_rules(args.accessed_from),
-            parse_rules(args.access_to)
+            args.accessed_from,
+            args.access_to
         ))
     elif args.command == "delete":
         if not args.name:

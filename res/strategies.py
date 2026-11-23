@@ -120,31 +120,14 @@ def get_user_guid_by_name(url, token, name):
     return None
 
 
-def get_device_group_guid_by_name(url, token, name):
-    """Get device group GUID by exact name match"""
-    headers = headers_with(token)
-    params = {"pageSize": 50, "name": name}
-    r = requests.get(f"{url}/api/device-groups", headers=headers, params=params)
-    res = check_response(r)
-    if not res:
-        return None
-    
-    groups_data = res.get("data", []) if isinstance(res, dict) else res
-    for g in groups_data:
-        if g.get("name") == name:
-            return g.get("guid")
-    return None
-
-
-def assign_strategy(url, token, strategy_name, peers=None, users=None, device_groups=None):
+def assign_strategy(url, token, strategy_name, peers=None, users=None):
     """
-    Assign strategy to peers, users, or device groups
+    Assign strategy to peers or users
     
     Args:
         strategy_name: Name of the strategy (or None to unassign)
         peers: List of device IDs or GUIDs
         users: List of user names or GUIDs
-        device_groups: List of device group names or GUIDs
     """
     headers = headers_with(token)
     
@@ -187,21 +170,6 @@ def assign_strategy(url, token, strategy_name, peers=None, users=None, device_gr
                     exit(1)
                 user_guids.append(guid)
     
-    # Convert device group names to GUIDs
-    device_group_guids = []
-    if device_groups:
-        for dg in device_groups:
-            # Check if it's already a GUID format
-            if len(dg) == 36 and dg.count('-') == 4:
-                device_group_guids.append(dg)
-            else:
-                # Treat as device group name, look it up
-                guid = get_device_group_guid_by_name(url, token, dg)
-                if not guid:
-                    print(f"Error: Device group '{dg}' not found")
-                    exit(1)
-                device_group_guids.append(guid)
-    
     # Build payload
     payload = {}
     if strategy_guid:
@@ -209,7 +177,6 @@ def assign_strategy(url, token, strategy_name, peers=None, users=None, device_gr
     
     payload["peers"] = peer_guids
     payload["users"] = user_guids
-    payload["groups"] = device_group_guids
     
     r = requests.post(f"{url}/api/strategies/assign", headers=headers, json=payload)
     check_response(r)
@@ -229,7 +196,6 @@ def main():
     # For assign/unassign commands
     parser.add_argument("--peers", help="Comma separated device IDs or GUIDs (requires Device Permission:r)")
     parser.add_argument("--users", help="Comma separated user names or GUIDs (requires User Permission:r)")
-    parser.add_argument("--device-groups", help="Comma separated device group names or GUIDs (requires Device Group Permission:r)")
 
     args = parser.parse_args()
     while args.url.endswith("/"): args.url = args.url[:-1]
@@ -271,29 +237,27 @@ def main():
         if not args.name:
             print("Error: --name is required")
             exit(1)
-        if not args.peers and not args.users and not args.device_groups:
-            print("Error: at least one of --peers, --users, or --device-groups is required")
+        if not args.peers and not args.users:
+            print("Error: at least one of --peers or --users is required")
             exit(1)
         
         peers = [x.strip() for x in args.peers.split(",") if x.strip()] if args.peers else None
         users = [x.strip() for x in args.users.split(",") if x.strip()] if args.users else None
-        device_groups = [x.strip() for x in args.device_groups.split(",") if x.strip()] if args.device_groups else None
         
-        assign_strategy(args.url, args.token, args.name, peers=peers, users=users, device_groups=device_groups)
-        count = (len(peers) if peers else 0) + (len(users) if users else 0) + (len(device_groups) if device_groups else 0)
+        assign_strategy(args.url, args.token, args.name, peers=peers, users=users)
+        count = (len(peers) if peers else 0) + (len(users) if users else 0)
         print(f"Success: Assigned strategy '{args.name}' to {count} target(s)")
     
     elif args.command == "unassign":
-        if not args.peers and not args.users and not args.device_groups:
-            print("Error: at least one of --peers, --users, or --device-groups is required")
+        if not args.peers and not args.users:
+            print("Error: at least one of --peers or --users is required")
             exit(1)
         
         peers = [x.strip() for x in args.peers.split(",") if x.strip()] if args.peers else None
         users = [x.strip() for x in args.users.split(",") if x.strip()] if args.users else None
-        device_groups = [x.strip() for x in args.device_groups.split(",") if x.strip()] if args.device_groups else None
         
-        assign_strategy(args.url, args.token, None, peers=peers, users=users, device_groups=device_groups)
-        count = (len(peers) if peers else 0) + (len(users) if users else 0) + (len(device_groups) if device_groups else 0)
+        assign_strategy(args.url, args.token, None, peers=peers, users=users)
+        count = (len(peers) if peers else 0) + (len(users) if users else 0)
         print(f"Success: Unassigned strategy from {count} target(s)")
 
 
