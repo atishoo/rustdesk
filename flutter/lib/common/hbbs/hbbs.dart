@@ -24,8 +24,7 @@ enum UserStatus { kDisabled, kNormal, kUnverified }
 // to-do: The UserPayload does not contain all the fields of the user.
 // Is all the fields of the user needed?
 class UserPayload {
-  String name = '';
-  String displayName = '';
+  String nickname = '';
   String avatar = '';
   String email = '';
   String note = '';
@@ -34,8 +33,7 @@ class UserPayload {
   bool isAdmin = false;
 
   UserPayload.fromJson(Map<String, dynamic> json)
-      : name = json['name'] ?? '',
-        displayName = json['display_name'] ?? '',
+      : nickname = json['nickname'] ?? '',
         avatar = json['avatar'] ?? '',
         email = json['email'] ?? '',
         note = json['note'] ?? '',
@@ -48,9 +46,9 @@ class UserPayload {
         isAdmin = json['is_admin'] == true;
 
   Map<String, dynamic> toJson() {
-    final Map<String, dynamic> map = {
-      'name': name,
-      'display_name': displayName,
+    return {
+      'email': email,
+      'nickname': nickname,
       'avatar': avatar,
       'status': status == UserStatus.kDisabled
           ? 0
@@ -58,20 +56,13 @@ class UserPayload {
               ? -1
               : 1,
     };
-    return map;
   }
 
   Map<String, dynamic> toGroupCacheJson() {
-    final Map<String, dynamic> map = {
-      'name': name,
-      'display_name': displayName,
-    };
-    return map;
+    return {'email': email, 'nickname': nickname, 'avatar': avatar};
   }
 
-  String get displayNameOrName {
-    return displayName.trim().isEmpty ? name : displayName;
-  }
+  String get displayLabel => nickname.trim().isEmpty ? email : nickname;
 }
 
 class PeerPayload {
@@ -79,7 +70,7 @@ class PeerPayload {
   Map<String, dynamic> info = {};
   int? status;
   String user = '';
-  String user_name = '';
+  String user_email = '';
   String note = '';
 
   PeerPayload.fromJson(Map<String, dynamic> json)
@@ -87,13 +78,13 @@ class PeerPayload {
         info = (json['info'] is Map<String, dynamic>) ? json['info'] : {},
         status = json['status'],
         user = json['user'] ?? '',
-        user_name = json['user_name'] ?? '',
+        user_email = json['user_email'] ?? '',
         note = json['note'] ?? '';
 
   static Peer toPeer(PeerPayload p) {
     return Peer.fromJson({
       "id": p.id,
-      'loginName': p.user_name,
+      'loginName': p.user_email,
       "username": p.info['username'] ?? '',
       "platform": _platform(p.info['os']),
       "hostname": p.info['device_name'],
@@ -128,7 +119,7 @@ class PeerPayload {
 }
 
 class LoginRequest {
-  String? username;
+  String? email;
   String? password;
   String? id;
   String? uuid;
@@ -139,7 +130,7 @@ class LoginRequest {
   String? secret;
 
   LoginRequest(
-      {this.username,
+      {this.email,
       this.password,
       this.id,
       this.uuid,
@@ -151,7 +142,7 @@ class LoginRequest {
 
   Map<String, dynamic> toJson() {
     final Map<String, dynamic> data = <String, dynamic>{};
-    if (username != null) data['username'] = username;
+    if (email != null) data['email'] = email;
     if (password != null) data['password'] = password;
     if (id != null) data['id'] = id;
     if (uuid != null) data['uuid'] = uuid;

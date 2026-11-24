@@ -353,25 +353,18 @@ class Enhancements: Reactor.Component {
     }
 }
 
-function getUserName() {
+function getAccountEmail() {
     try {
-        return JSON.parse(handler.get_local_option("user_info")).name;
+        return JSON.parse(handler.get_local_option("user_info")).email;
     } catch(e) {}
     return '';
 }
 
-function getAccountLabelWithHandle() {
+function getAccountLabel() {
     try {
         var user = JSON.parse(handler.get_local_option("user_info"));
-        var username = (user.name || '').trim();
-        if (!username) {
-            return '';
-        }
-        var displayName = (user.display_name || '').trim();
-        if (!displayName || displayName == username) {
-            return username;
-        }
-        return displayName + " (@" + username + ")";
+        var nickname = (user.nickname || '').trim();
+        return nickname || (user.email || '').trim();
     } catch(e) {}
     return '';
 }
@@ -516,7 +509,7 @@ class MyIdMenu: Reactor.Component {
     }
 
     function renderPop() {
-        var accountLabel = accountSessionVerified ? getAccountLabelWithHandle() : '';
+        var accountLabel = accountSessionVerified ? getAccountLabel() : '';
         var hasAccountToken = accountTokenCurrent;
         return <popup>
             <menu.context #config-options>
@@ -1527,9 +1520,9 @@ function check_if_overlay() {
 checkConnectStatus();
 
 function set_local_user_info(user) {
-    var user_info = {name: user.name};
-    if (user.display_name) {
-        user_info.display_name = user.display_name;
+    var user_info = {email: user.email};
+    if (user.nickname) {
+        user_info.nickname = user.nickname;
     }
     if (user.avatar) {
         user_info.avatar = user.avatar;
@@ -1569,11 +1562,11 @@ function currentLoginAttempt(loginContext, initialToken, attempt, show_progress)
 }
 
 function login() {
-    var name0 = getUserName();
+    var name0 = getAccountEmail();
     var pass0 = '';
     var dialogAttempt = accountLoginAttempt;
     msgbox("custom-login", translate('Login'), <div .form .set-password> 
-            <div><span>{translate('Username')}:</span><input|text name="username" value={name0} .outline-focus /></div> 
+            <div><span>{translate('Email')}:</span><input|text name="email" value={name0} .outline-focus /></div>
             <div><span>{translate('Password')}:</span><PasswordComponent value={pass0} /></div> 
         </div>, "", function(res=null, show_progress) {
         if (!res) {
@@ -1581,9 +1574,13 @@ function login() {
             return;
         }
         show_progress();
-        var name = (res.username || '').trim();
+        var name = (res.email || '').trim();
         if (!name) {
-            show_progress(false, translate("Username missed"));
+            show_progress(false, translate("Email") + ": " + translate("Invalid format"));
+            return " ";
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(name)) {
+            show_progress(false, translate("Email") + ": " + translate("Invalid format"));
             return " ";
         }
         var pass = (res.password || '').trim();
@@ -1597,7 +1594,7 @@ function login() {
         var attempt = ++accountLoginAttempt;
         dialogAttempt = attempt;
         var url = loginContext[0];
-        httpRequest(url + "/api/login", #post, {username: name, password: pass, id: my_id, uuid: handler.get_uuid(), type: 'account', deviceInfo: getDeviceInfo()}, function(data) {
+        httpRequest(url + "/api/login", #post, {email: name, password: pass, id: my_id, uuid: handler.get_uuid(), type: 'account', deviceInfo: getDeviceInfo()}, function(data) {
             if (!currentLoginAttempt(loginContext, initialToken, attempt, show_progress)) return;
             if (data.error) {
                 abLoading = false;
@@ -1652,7 +1649,7 @@ function on_2fa_check(last_msg, loginContext, initialToken, attempt) {
             abLoading = true;
             var url = loginContext[0];
             const loginData = {
-                username: last_msg.user.name,
+                email: last_msg.user.email,
                 id: my_id,
                 uuid: handler.get_uuid(),
                 type: 'email_code',

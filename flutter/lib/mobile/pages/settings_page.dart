@@ -741,9 +741,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             title: Text(translate('Account')),
             tiles: [
               SettingsTile(
-                title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
+                title: Obx(() => Text(gFFI.userModel.email.value.isEmpty
                     ? translate('Login')
-                    : '${translate('Logout')} (${gFFI.userModel.accountLabelWithHandle})')),
+                    : '${translate('Logout')} (${gFFI.userModel.displayLabel})')),
                 leading: Obx(() {
                   final avatar = bind.mainResolveAvatarUrl(
                       avatar: gFFI.userModel.avatar.value);
@@ -751,12 +751,21 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                         avatar: avatar,
                         size: 28,
                         borderRadius: null,
-                        fallback: Icon(Icons.person),
+                        fallback: gFFI.userModel.isLogin
+                            ? CircleAvatar(
+                                radius: 14,
+                                backgroundColor:
+                                    str2color(gFFI.userModel.email.value, 0xAF),
+                                child: Text(gFFI
+                                    .userModel.displayLabel.characters.first
+                                    .toUpperCase()),
+                              )
+                            : Icon(Icons.person),
                       ) ??
                       Icon(Icons.person);
                 }),
                 onPressed: (context) {
-                  if (gFFI.userModel.userName.value.isEmpty) {
+                  if (gFFI.userModel.email.value.isEmpty) {
                     loginDialog();
                   } else {
                     logOutConfirmDialog();

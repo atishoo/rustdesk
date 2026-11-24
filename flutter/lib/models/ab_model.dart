@@ -230,7 +230,7 @@ class AbModel {
           debugPrint("pull ab list");
           List<AbProfile> abProfiles = List.empty(growable: true);
           abProfiles.add(AbProfile(_personalAbGuid!, _personalAddressBookName,
-              gFFI.userModel.userName.value, null, ShareRule.read.value, null));
+              gFFI.userModel.email.value, null, ShareRule.read.value, null));
           // get all address book name
           await _getSharedAbProfiles(abProfiles, quiet: quiet);
           if (!await _pullIsCurrent()) return;

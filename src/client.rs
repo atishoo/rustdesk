@@ -4589,11 +4589,11 @@ impl LoginConfigHandler {
             display_name =
                 serde_json::from_str::<serde_json::Value>(&LocalConfig::get_option("user_info"))
                     .map(|x| {
-                        x.get("display_name")
+                        x.get("nickname")
                             .and_then(|x| x.as_str())
                             .map(|x| x.trim())
                             .filter(|x| !x.is_empty())
-                            .or_else(|| x.get("name").and_then(|x| x.as_str()))
+                            .or_else(|| x.get("email").and_then(|x| x.as_str()))
                             .map(|x| x.to_owned())
                             .unwrap_or_default()
                     })

@@ -5,6 +5,7 @@ import 'package:flutter_hbb/common/hbbs/hbbs.dart';
 import 'package:flutter_hbb/common/widgets/login.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/models/state_model.dart';
+import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
 
 import '../../common.dart';
@@ -158,15 +159,15 @@ class _MyGroupState extends State<MyGroup> {
       final userItems = gFFI.groupModel.users.where((p0) {
         if (searchAccessibleItemNameText.isNotEmpty) {
           final search = searchAccessibleItemNameText.value.toLowerCase();
-          return p0.name.toLowerCase().contains(search) ||
-              p0.displayNameOrName.toLowerCase().contains(search);
+          return p0.email.toLowerCase().contains(search) ||
+              p0.displayLabel.toLowerCase().contains(search);
         }
         return true;
       }).toList();
-      // Count occurrences of each displayNameOrName to detect duplicates
+      // Count occurrences of each displayLabel to detect duplicates
       final displayNameCount = <String, int>{};
       for (final u in userItems) {
-        final dn = u.displayNameOrName;
+        final dn = u.displayLabel;
         displayNameCount[dn] = (displayNameCount[dn] ?? 0) + 1;
       }
       listView(bool isPortrait) => ListView.builder(
@@ -182,23 +183,22 @@ class _MyGroupState extends State<MyGroup> {
   }
 
   Widget _buildUserItem(UserPayload user, Map<String, int> displayNameCount) {
-    final username = user.name;
-    final dn = user.displayNameOrName;
+    final email = user.email;
+    final dn = user.displayLabel;
     final isDuplicate = (displayNameCount[dn] ?? 0) > 1;
-    final displayName =
-        isDuplicate && user.displayName.trim().isNotEmpty
-            ? '${user.displayName} (@$username)'
-            : dn;
+    final displayName = isDuplicate && user.nickname.trim().isNotEmpty
+        ? '${user.nickname} ($email)'
+        : dn;
     return InkWell(onTap: () {
-      if (selectedAccessibleItemName.value != username) {
-        selectedAccessibleItemName.value = username;
+      if (selectedAccessibleItemName.value != email) {
+        selectedAccessibleItemName.value = email;
       } else {
         selectedAccessibleItemName.value = '';
       }
     }, child: Obx(
       () {
-        bool selected = selectedAccessibleItemName.value == username;
-        final isMe = username == gFFI.userModel.userName.value;
+        bool selected = selectedAccessibleItemName.value == email;
+        final isMe = email == gFFI.userModel.email.value;
         final colorMe = MyTheme.color(context).me!;
         return Container(
           decoration: BoxDecoration(
@@ -211,24 +211,21 @@ class _MyGroupState extends State<MyGroup> {
           child: Container(
             child: Row(
               children: [
-                Container(
-                  width: 20,
-                  height: 20,
-                  decoration: BoxDecoration(
-                    color: str2color(username, 0xAF),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Align(
-                    alignment: Alignment.center,
-                    child: Center(
-                      child: Text(
-                        displayName.characters.first.toUpperCase(),
-                        style: TextStyle(color: Colors.white),
-                        textAlign: TextAlign.center,
-                      ),
+                buildAvatarWidget(
+                  avatar: bind.mainResolveAvatarUrl(avatar: user.avatar),
+                  size: 20,
+                  fallback: CircleAvatar(
+                    radius: 10,
+                    backgroundColor: str2color(email, 0xAF),
+                    child: Text(
+                      displayName.isEmpty
+                          ? '?'
+                          : displayName.characters.first.toUpperCase(),
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
                     ),
                   ),
-                ).marginOnly(right: 4),
+                )!
+                    .marginOnly(right: 4),
                 if (isMe) Flexible(child: Text(displayName)),
                 if (isMe)
                   Flexible(

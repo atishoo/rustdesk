@@ -15,28 +15,17 @@ import 'platform_model.dart';
 bool refreshingUser = false;
 
 class UserModel {
-  final RxString userName = ''.obs;
-  final RxString displayName = ''.obs;
+  final RxString email = ''.obs;
+  final RxString nickname = ''.obs;
   final RxString avatar = ''.obs;
   final RxBool isAdmin = false.obs;
   final RxString networkError = ''.obs;
   // True when networkError carries a server-reported error rather than a
   // connectivity failure; netWorkErrorWidget hides the network tip then.
   final RxBool networkErrorFromServer = false.obs;
-  bool get isLogin => userName.isNotEmpty;
-  String get displayNameOrUserName =>
-      displayName.value.trim().isEmpty ? userName.value : displayName.value;
-  String get accountLabelWithHandle {
-    final username = userName.value.trim();
-    if (username.isEmpty) {
-      return '';
-    }
-    final preferred = displayName.value.trim();
-    if (preferred.isEmpty || preferred == username) {
-      return username;
-    }
-    return '$preferred (@$username)';
-  }
+  bool get isLogin => email.isNotEmpty;
+  String get displayLabel =>
+      nickname.value.trim().isEmpty ? email.value : nickname.value;
 
   WeakReference<FFI> parent;
   int _loginGeneration = 0;
@@ -49,9 +38,9 @@ class UserModel {
   Future<void> _pendingServerConfig = Future.value();
 
   UserModel(this.parent) {
-    userName.listen((p0) {
-      // When user name becomes empty, show login button
-      // When user name becomes non-empty:
+    email.listen((p0) {
+      // When email becomes empty, show login button
+      // When email becomes non-empty:
       //  For _updateLocalUserInfo, network error will be set later
       //  For login success, should clear network error
       networkError.value = '';
@@ -94,9 +83,9 @@ class UserModel {
             bind.mainGetLocalOption(key: 'access_token') == rawToken &&
             currentContext[0] == url &&
             currentContext[1].isEmpty &&
-            userName.isNotEmpty) {
-          userName.value = '';
-          displayName.value = '';
+            email.isNotEmpty) {
+          email.value = '';
+          nickname.value = '';
           avatar.value = '';
           isAdmin.value = false;
           await gFFI.abModel.reset();
@@ -193,8 +182,8 @@ class UserModel {
   _updateLocalUserInfo() {
     final userInfo = getLocalUserInfo();
     if (userInfo != null) {
-      userName.value = (userInfo['name'] ?? '').toString();
-      displayName.value = (userInfo['display_name'] ?? '').toString();
+      email.value = (userInfo['email'] ?? '').toString();
+      nickname.value = (userInfo['nickname'] ?? '').toString();
       avatar.value = (userInfo['avatar'] ?? '').toString();
     }
   }
@@ -206,14 +195,14 @@ class UserModel {
       await gFFI.abModel.reset();
       await gFFI.groupModel.reset();
     }
-    userName.value = '';
-    displayName.value = '';
+    email.value = '';
+    nickname.value = '';
     avatar.value = '';
   }
 
   Future<void> _parseAndUpdateUser(UserPayload user) async {
-    userName.value = user.name;
-    displayName.value = user.displayName;
+    email.value = user.email;
+    nickname.value = user.nickname;
     avatar.value = user.avatar;
     isAdmin.value = user.isAdmin;
     await Future.wait([

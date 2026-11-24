@@ -1104,7 +1104,7 @@ class RecentPeerCard extends BasePeerCard {
       menuItems.add(_rmFavAction(peer.id, () async {}));
     }
 
-    if (gFFI.userModel.userName.isNotEmpty) {
+    if (gFFI.userModel.email.isNotEmpty) {
       menuItems.add(_addToAb(peer));
     }
 
@@ -1144,7 +1144,7 @@ class FavoritePeerCard extends BasePeerCard {
       await bind.mainLoadFavPeers();
     }));
 
-    if (gFFI.userModel.userName.isNotEmpty) {
+    if (gFFI.userModel.email.isNotEmpty) {
       menuItems.add(_addToAb(peer));
     }
 
@@ -1184,7 +1184,7 @@ class DiscoveredPeerCard extends BasePeerCard {
       menuItems.add(_rmFavAction(peer.id, () async {}));
     }
 
-    if (gFFI.userModel.userName.isNotEmpty) {
+    if (gFFI.userModel.email.isNotEmpty) {
       menuItems.add(_addToAb(peer));
     }
 
@@ -1347,7 +1347,7 @@ class MyGroupPeerCard extends BasePeerCard {
   Future<List<MenuEntryBase<String>>> _buildMenuItems(
       BuildContext context) async {
     final menuItems = await _buildConnectionMenuItems(context);
-    if (isWindows || gFFI.userModel.userName.isNotEmpty) {
+    if (isWindows || gFFI.userModel.email.isNotEmpty) {
       menuItems.add(MenuEntryDivider());
     }
     if (isWindows) {
@@ -1358,7 +1358,7 @@ class MyGroupPeerCard extends BasePeerCard {
     // if (await bind.mainPeerHasPassword(id: peer.id)) {
     //   menuItems.add(_unrememberPasswordAction(peer.id));
     // }
-    if (gFFI.userModel.userName.isNotEmpty) {
+    if (gFFI.userModel.email.isNotEmpty) {
       menuItems.add(_addToAb(peer));
     }
     return menuItems;

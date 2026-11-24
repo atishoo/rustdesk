@@ -629,9 +629,9 @@ class LoginWidgetOP extends StatelessWidget {
 }
 
 class LoginWidgetUserPass extends StatelessWidget {
-  final TextEditingController username;
+  final TextEditingController email;
   final TextEditingController pass;
-  final String? usernameMsg;
+  final String? emailMsg;
   final String? passMsg;
   final bool isInProgress;
   final RxString curOP;
@@ -640,9 +640,9 @@ class LoginWidgetUserPass extends StatelessWidget {
   const LoginWidgetUserPass({
     Key? key,
     this.userFocusNode,
-    required this.username,
+    required this.email,
     required this.pass,
-    required this.usernameMsg,
+    required this.emailMsg,
     required this.passMsg,
     required this.isInProgress,
     required this.curOP,
@@ -658,11 +658,12 @@ class LoginWidgetUserPass extends StatelessWidget {
           children: [
             const SizedBox(height: 8.0),
             DialogTextField(
-                title: translate(DialogTextField.kUsernameTitle),
-                controller: username,
+                title: translate('Email'),
+                controller: email,
                 focusNode: userFocusNode,
-                prefixIcon: DialogTextField.kUsernameIcon,
-                errorText: usernameMsg),
+                keyboardType: TextInputType.emailAddress,
+                prefixIcon: Icon(Icons.email_outlined),
+                errorText: emailMsg),
             PasswordWidget(
               controller: pass,
               autoFocus: false,
@@ -720,13 +721,13 @@ Future<bool?> _openLoginDialogOnce() async {
 }
 
 Future<bool?> _openLoginDialog() async {
-  var username =
-      TextEditingController(text: UserModel.getLocalUserInfo()?['name'] ?? '');
+  var email =
+      TextEditingController(text: UserModel.getLocalUserInfo()?['email'] ?? '');
   var password = TextEditingController();
   final userFocusNode = FocusNode()..requestFocus();
   Timer(Duration(milliseconds: 100), () => userFocusNode..requestFocus());
 
-  String? usernameMsg;
+  String? emailMsg;
   String? passwordMsg;
   var isInProgress = false;
   var dialogActive = true;
@@ -754,9 +755,9 @@ Future<bool?> _openLoginDialog() async {
   Future.delayed(Duration.zero, fetchLoginOptions);
 
   final res = await gFFI.dialogManager.show<bool>((setState, close, context) {
-    username.addListener(() {
-      if (usernameMsg != null) {
-        setState(() => usernameMsg = null);
+    email.addListener(() {
+      if (emailMsg != null) {
+        setState(() => emailMsg = null);
       }
     });
 
@@ -824,8 +825,9 @@ Future<bool?> _openLoginDialog() async {
         return;
       }
       // validate
-      if (username.text.isEmpty) {
-        setState(() => usernameMsg = translate('Username missed'));
+      if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$').hasMatch(email.text.trim())) {
+        setState(() =>
+            emailMsg = '${translate('Email')}: ${translate('Invalid format')}');
         return;
       }
       if (password.text.isEmpty) {
@@ -837,7 +839,7 @@ Future<bool?> _openLoginDialog() async {
       try {
         final resp = await gFFI.userModel.login(
             LoginRequest(
-                username: username.text,
+                email: email.text.trim(),
                 password: password.text,
                 id: await bind.mainGetMyId(),
                 uuid: await bind.mainGetUuid(),
@@ -975,9 +977,9 @@ Future<bool?> _openLoginDialog() async {
             height: 8.0,
           ),
           LoginWidgetUserPass(
-            username: username,
+            email: email,
             pass: password,
-            usernameMsg: usernameMsg,
+            emailMsg: emailMsg,
             passMsg: passwordMsg,
             isInProgress: isInProgress,
             curOP: curOP,
@@ -1027,7 +1029,7 @@ Future<bool?> verificationCodeDialog(
                 verificationCode: code.text,
                 tfaCode: isEmailVerification ? null : code.text,
                 secret: secret,
-                username: user?.name,
+                email: user?.email,
                 id: await bind.mainGetMyId(),
                 uuid: await bind.mainGetUuid(),
                 autoLogin: autoLogin,

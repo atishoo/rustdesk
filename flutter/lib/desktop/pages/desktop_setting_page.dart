@@ -2282,11 +2282,11 @@ class _AccountState extends State<_Account> {
 
   Widget accountAction() {
     return Obx(() => _Button(
-        gFFI.userModel.userName.value.isEmpty
+        gFFI.userModel.email.value.isEmpty
             ? 'Login'
-            : '${translate('Logout')} (${gFFI.userModel.accountLabelWithHandle})',
+            : '${translate('Logout')} (${gFFI.userModel.displayLabel})',
         () => {
-              gFFI.userModel.userName.value.isEmpty
+              gFFI.userModel.email.value.isEmpty
                   ? loginDialog()
                   : logOutConfirmDialog()
             }));
@@ -2294,7 +2294,7 @@ class _AccountState extends State<_Account> {
 
   Widget useInfo() {
     return Obx(() => Offstage(
-          offstage: gFFI.userModel.userName.value.isEmpty,
+          offstage: gFFI.userModel.email.value.isEmpty,
           child: Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
@@ -2312,7 +2312,7 @@ class _AccountState extends State<_Account> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          gFFI.userModel.displayNameOrUserName,
+                          gFFI.userModel.displayLabel,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -2323,7 +2323,7 @@ class _AccountState extends State<_Account> {
                         const SizedBox(height: 2),
                         SelectionArea(
                           child: Text(
-                            '@${gFFI.userModel.userName.value}',
+                            gFFI.userModel.email.value,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -2350,6 +2350,13 @@ class _AccountState extends State<_Account> {
     return buildAvatarWidget(
       avatar: avatar,
       size: 44,
+      fallback: CircleAvatar(
+        radius: 22,
+        backgroundColor: str2color(gFFI.userModel.email.value, 0xAF),
+        child: Text(gFFI.userModel.displayLabel.isEmpty
+            ? '?'
+            : gFFI.userModel.displayLabel.characters.first.toUpperCase()),
+      ),
     );
   }
 }

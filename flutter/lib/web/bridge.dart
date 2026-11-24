@@ -1748,8 +1748,8 @@ class CapylinkImpl {
           (token == null || token == '') &&
           authBody['secret'] is String &&
           user is Map &&
-          user['name'] is String &&
-          (user['name'] as String).isNotEmpty &&
+          user['email'] is String &&
+          (user['email'] as String).isNotEmpty &&
           (tfaType == null ||
               tfaType == 'email_check' ||
               tfaType == 'tfa_check') &&
