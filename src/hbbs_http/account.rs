@@ -78,6 +78,7 @@ pub enum UserStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPayload {
+    pub id: Option<u64>,
     pub email: String,
     #[serde(default)]
     pub nickname: Option<String>,
@@ -316,6 +317,7 @@ impl OidcSession {
                             super::store_account_token(
                                 auth_body.access_token.clone(),
                                 &deployment,
+                                auth_body.user.id,
                             );
                             LocalConfig::set_option(
                                 "user_info".to_owned(),

@@ -19,6 +19,7 @@ use std::{
     ops::Deref,
     str::FromStr,
     sync::{
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, RecvTimeoutError},
         Arc, Mutex, RwLock,
     },
@@ -568,6 +569,25 @@ enum PinnedRendezvous {
     AnonymousWebRtc,
 }
 
+fn peer_relay_transport(
+    pinned: Option<PinnedRendezvous>,
+    signaling: Option<PinnedRendezvous>,
+    id_endpoint: &str,
+    relay_endpoint: &str,
+) -> Option<PinnedRendezvous> {
+    pinned.or(signaling.filter(|transport| match transport {
+        // An explicit relay URL already specifies its own transport.
+        PinnedRendezvous::Tcp => !relay_endpoint.contains("://"),
+        PinnedRendezvous::AnonymousWebSocket => {
+            websocket_gateway_relay(id_endpoint).is_some_and(|gateway| {
+                websocket_relay_endpoint(&check_port(relay_endpoint, RELAY_PORT), id_endpoint)
+                    .is_ok_and(|relay| relay == gateway)
+            })
+        }
+        _ => false,
+    }))
+}
+
 async fn connect_pinned_rendezvous(
     endpoint: &str,
     transport: PinnedRendezvous,
@@ -641,8 +661,12 @@ fn websocket_relay_endpoint(relay: &str, id_endpoint: &str) -> ResultType<String
     Ok(format!("{scheme}://{host}{port}/ws/relay"))
 }
 
-async fn connect_legacy_rendezvous(server: &str, endpoint: &mut String) -> ResultType<Stream> {
-    *endpoint = if hbb_common::webrtc::is_webrtc_endpoint(server) {
+async fn connect_legacy_rendezvous(
+    server: &str,
+    endpoint: &mut String,
+    fixed: bool,
+) -> ResultType<Stream> {
+    *endpoint = if fixed || hbb_common::webrtc::is_webrtc_endpoint(server) {
         server.to_owned()
     } else {
         check_ws(server)
@@ -661,11 +685,29 @@ pub struct RendezvousFeedback {
     token: String,
     key: String,
     pinned_rendezvous: Option<PinnedRendezvous>,
+    fixed_native: bool,
+    password_deployment: Option<String>,
 }
 
 impl RendezvousFeedback {
     pub(crate) fn password_scope(&self) -> Option<String> {
         password_scope(&self.server, &self.key)
+    }
+
+    pub(crate) fn configure_password_route(
+        &self,
+        trust: &mut crate::trusted_devices::client::Session,
+    ) {
+        trust.password_scope = self.password_scope();
+        trust.password_deployment = self.password_deployment.clone();
+        if trust.peer_public_key().is_some() && valid_uri_rendezvous(&self.server) {
+            trust.password_rendezvous = Some(ExpectedRendezvous {
+                server: self.server.clone(),
+                key: self.key.clone(),
+                fixed_endpoint: true,
+                guard_only: true,
+            });
+        }
     }
 }
 
@@ -702,6 +744,7 @@ impl Client {
         RendezvousFeedback,
     )> {
         debug_assert!(peer == interface.get_id());
+        let options = Config::get_options();
         interface.update_direct(None);
         interface.update_received(false);
         match Self::_start(peer, key, token, conn_type, interface.clone()).await {
@@ -713,7 +756,12 @@ impl Client {
                     return Err(err);
                 }
             }
-            Ok(x) => {
+            Ok(mut x) => {
+                x.1.password_deployment = crate::hbbs_http::password_deployment_for_route(
+                    &options,
+                    &x.1.server,
+                    &x.1.key,
+                );
                 #[cfg(feature = "flutter")]
                 {
                     let lch = interface.get_lch();
@@ -813,10 +861,16 @@ impl Client {
         let (attached_server, expected_rendezvous, inherited_rendezvous) = {
             let lch = interface.get_lch();
             let lch = lch.read().unwrap();
+            let confirmed = lch
+                .account_password_rendezvous
+                .as_ref()
+                .filter(|_| lch.expected_rendezvous.is_none());
             (
                 lch.other_server.clone(),
-                lch.expected_rendezvous.clone(),
-                lch.inherited_rendezvous.clone(),
+                lch.expected_rendezvous.clone().or_else(|| confirmed.cloned()),
+                lch.inherited_rendezvous
+                    .clone()
+                    .or_else(|| confirmed.map(|route| route.server.clone())),
             )
         };
         let guard_only = expected_rendezvous.as_ref().is_some_and(|expected| expected.guard_only);
@@ -933,14 +987,15 @@ impl Client {
             Some(_) => Some(PinnedRendezvous::Tcp),
             None => None,
         };
-        if let Some(transport) = pinned_rendezvous {
+        if let Some(endpoint) = pinned_endpoint.as_deref().filter(|_| {
+            pinned_rendezvous.is_some()
+                || expected_rendezvous
+                    .as_ref()
+                    .is_some_and(|expected| expected.fixed_endpoint)
+        }) {
             let lch = interface.get_lch();
             let mut lch = lch.write().unwrap();
-            lch.force_relay = lch.policy_relay
-                || matches!(
-                    transport,
-                    PinnedRendezvous::VerifiedWss | PinnedRendezvous::AnonymousWebSocket
-                );
+            lch.force_relay = lch.policy_relay || is_ws_endpoint(endpoint);
         }
         let (rendezvous_server, servers, contained) = if let Some(endpoint) = pinned_endpoint {
             (endpoint, Vec::new(), true)
@@ -1014,6 +1069,10 @@ impl Client {
             None
         };
         let has_webrtc_offerer = webrtc_offerer.is_some();
+        let route_guard = expected_rendezvous
+            .as_ref()
+            .filter(|expected| expected.guard_only)
+            .cloned();
         let fut = Self::_start_inner(
             peer.to_owned(),
             key.to_owned(),
@@ -1028,6 +1087,7 @@ impl Client {
             servers.clone(),
             contained,
             pinned_rendezvous,
+            route_guard.clone(),
         );
         // The fallback request exists only to carry a TCP punch, so it is pointless once TCP
         // punch is off — it would reach `connect()` with nothing to try and just open a second
@@ -1057,6 +1117,7 @@ impl Client {
             servers,
             contained,
             pinned_rendezvous,
+            route_guard,
         )
         .boxed();
         if has_webrtc_offerer {
@@ -1284,6 +1345,7 @@ impl Client {
         servers: Vec<String>,
         contained: bool,
         mut pinned_rendezvous: Option<PinnedRendezvous>,
+        route_guard: Option<ExpectedRendezvous>,
     ) -> ResultType<(
         (
             Stream,
@@ -1298,11 +1360,13 @@ impl Client {
         // Wrap the offerer so any early return below (?/bail) or cancellation of this future by
         // the outer select_ok closes its pc instead of leaking it in SESSIONS. Disarmed via
         // into_inner() once the stream is adopted into a connection attempt.
-        let route_guard = interface.get_lch().read().unwrap().expected_rendezvous.clone()
-            .filter(|expected| expected.guard_only);
+        let fixed_endpoint = route_guard
+            .as_ref()
+            .is_some_and(|expected| expected.fixed_endpoint);
         let mut webrtc_offerer = webrtc_offerer.map(OffererGuard::new);
         let mut start = Instant::now();
         let mut connected_endpoint = rendezvous_server.clone();
+        let mut verified_native_wss = false;
         let mut socket = if let Some(transport) = pinned_rendezvous {
             match connect_pinned_rendezvous(&rendezvous_server, transport).await {
                 Err(error)
@@ -1325,8 +1389,28 @@ impl Client {
                 }
                 result => result,
             }
+        } else if fixed_endpoint
+            && rendezvous_server.starts_with("wss://")
+            && (webrtc_offerer.is_some() || !interface.get_switch_code().is_empty())
+        {
+            match connect_pinned_rendezvous(&rendezvous_server, PinnedRendezvous::VerifiedWss).await {
+                Ok(socket) => {
+                    verified_native_wss = true;
+                    Ok(socket)
+                }
+                Err(_) => {
+                    webrtc_offerer = None;
+                    connect_legacy_rendezvous(
+                        &rendezvous_server,
+                        &mut connected_endpoint,
+                        fixed_endpoint,
+                    )
+                    .await
+                }
+            }
         } else {
-            connect_legacy_rendezvous(&rendezvous_server, &mut connected_endpoint).await
+            connect_legacy_rendezvous(&rendezvous_server, &mut connected_endpoint, fixed_endpoint)
+                .await
         };
         debug_assert!(!servers.contains(&rendezvous_server));
         let rtt = start.elapsed();
@@ -1335,7 +1419,7 @@ impl Client {
             log::info!("try the other servers: {:?}", servers);
             for server in servers {
                 let server = check_port(server, RENDEZVOUS_PORT);
-                socket = connect_legacy_rendezvous(&server, &mut connected_endpoint).await;
+                socket = connect_legacy_rendezvous(&server, &mut connected_endpoint, false).await;
                 if socket.is_ok() {
                     rendezvous_server = server;
                     break;
@@ -1370,9 +1454,16 @@ impl Client {
         };
 
         let switch_code = interface.get_switch_code();
+        let fixed_tcp = (fixed_endpoint || pinned_rendezvous.is_some())
+            && matches!(&socket, Stream::Tcp(_));
+        // Internal route guards keep the native rendezvous token policy.
+        let strict_tcp = fixed_tcp && pinned_rendezvous.is_some();
+        let verified_wss = verified_native_wss
+            || matches!(pinned_rendezvous, Some(PinnedRendezvous::VerifiedWss));
+        if fixed_endpoint && !fixed_tcp && !verified_wss && !socket.is_secured() {
+            webrtc_offerer = None;
+        }
         let carries_offer = webrtc_offerer.as_ref().and_then(|g| g.stream()).is_some();
-        let pinned_tcp = matches!(pinned_rendezvous, Some(PinnedRendezvous::Tcp));
-        let verified_wss = matches!(pinned_rendezvous, Some(PinnedRendezvous::VerifiedWss));
         // Counted from before the key exchange, so the exchange spends the UDP NAT test's own
         // wait rather than replacing it: the test runs beside both.
         let udp_nat_wait_from = Instant::now();
@@ -1383,7 +1474,7 @@ impl Client {
             // exchange, the offer is dropped and this becomes a punch without WebRTC, on a fresh
             // socket since the failed exchange may have consumed a message on this one. Degrade
             // to no WebRTC, never to WebRTC signalling in the clear.
-            let secured = if pinned_tcp {
+            let secured = if fixed_tcp {
                 crate::common::key_exchange(&mut socket, &key, true)
                     .await
                     .and_then(|authenticated| {
@@ -1398,14 +1489,16 @@ impl Client {
             match secured {
                 Ok(()) => {}
                 Err(err) => {
-                    if pinned_tcp {
+                    if fixed_tcp {
                         hbb_common::throttled_log!(
                             Duration::from_secs(60),
                             warn,
                             "The pinned rendezvous TCP stream could not be authenticated: {}",
                             err
                         );
-                        token.clear();
+                        if strict_tcp {
+                            token.clear();
+                        }
                     } else {
                         log::warn!(
                             "WebRTC signalling to {} cannot be encrypted, punching without WebRTC: {}",
@@ -1420,6 +1513,7 @@ impl Client {
                         connect_legacy_rendezvous(
                             &rendezvous_server,
                             &mut connected_endpoint,
+                            fixed_endpoint,
                         )
                         .await?
                     };
@@ -1427,10 +1521,13 @@ impl Client {
                 }
             }
         }
-        if pinned_tcp && !socket.is_secured() {
-            token.clear();
+        if fixed_tcp && !socket.is_secured() {
+            if strict_tcp {
+                token.clear();
+            }
+            webrtc_offerer = None;
         }
-        if pinned_rendezvous.is_some()
+        if (pinned_rendezvous.is_some() || fixed_endpoint)
             && !switch_code.is_empty()
             && !verified_wss
             && !socket.is_secured()
@@ -1468,6 +1565,17 @@ impl Client {
         }) {
             bail!("The connected ID server no longer matches this session");
         }
+        let relay_transport = pinned_rendezvous.or_else(|| {
+            fixed_endpoint.then(|| {
+                if is_ws_endpoint(&connected_endpoint) {
+                    PinnedRendezvous::AnonymousWebSocket
+                } else if hbb_common::webrtc::is_webrtc_endpoint(&connected_endpoint) {
+                    PinnedRendezvous::AnonymousWebRtc
+                } else {
+                    PinnedRendezvous::Tcp
+                }
+            })
+        });
         // Stop UDP NAT test task if still running
         stop_udp_tx.map(|tx| tx.send(()));
         let mut msg_out = RendezvousMessage::new();
@@ -1537,6 +1645,7 @@ impl Client {
                         &connected_endpoint,
                         &key,
                         pinned,
+                        fixed_endpoint,
                     )
                     .await)
             {
@@ -1574,12 +1683,7 @@ impl Client {
                                     && token.is_empty()
                                     && !verified_wss
                                     && !socket.is_secured()
-                                    && interface
-                                        .get_lch()
-                                        .read()
-                                        .unwrap()
-                                        .expected_rendezvous
-                                        .is_some()
+                                    && (pinned_rendezvous.is_some() || route_guard.is_some())
                                 {
                                     bail!(
                                         "{}\nEnter the remote ID in the capylink client or connect through a verified WSS server.",
@@ -1708,6 +1812,12 @@ impl Client {
                         // coordinates a FRESH uuid via the rendezvous server, so it works even if
                         // the raced create_relay already consumed the original uuid pairing.
                         let relay_server_rr = rr.relay_server.clone();
+                        let peer_transport = peer_relay_transport(
+                            pinned_rendezvous,
+                            relay_transport,
+                            &rendezvous_server,
+                            &relay_server_rr,
+                        );
                         let fut = Self::create_relay(
                             &peer,
                             rr.uuid,
@@ -1715,13 +1825,12 @@ impl Client {
                             &key,
                             conn_type,
                             my_addr.is_ipv4(),
-                            pinned_rendezvous
-                                .map(|transport| (rendezvous_server.as_str(), transport)),
+                            peer_transport.map(|transport| (rendezvous_server.as_str(), transport)),
                         );
                         connect_futures.push(
                             async move {
                                 let conn = fut.await?;
-                                let over_ws = if pinned_rendezvous.is_some() {
+                                let over_ws = if relay_transport.is_some() {
                                     matches!(&conn, Stream::WebSocket(_))
                                 } else {
                                     use_ws()
@@ -1812,6 +1921,7 @@ impl Client {
                                     relay_server_rr,
                                     &rendezvous_server,
                                     pinned_rendezvous,
+                                    relay_transport,
                                     !signed_id_pk.is_empty(),
                                     &key,
                                     &token,
@@ -1835,7 +1945,7 @@ impl Client {
                                 )
                                 .await?;
                                 conn = relay_conn;
-                                let over_ws = if pinned_rendezvous.is_some() {
+                                let over_ws = if relay_transport.is_some() {
                                     matches!(&conn, Stream::WebSocket(_))
                                 } else {
                                     use_ws()
@@ -1865,6 +1975,8 @@ impl Client {
                                 token,
                                 key,
                                 pinned_rendezvous,
+                                fixed_native: fixed_endpoint,
+                                password_deployment: None,
                             },
                             false,
                         ));
@@ -1978,6 +2090,7 @@ impl Client {
                 &relay_server,
                 &rendezvous_server,
                 pinned_rendezvous,
+                relay_transport,
                 time_used,
                 peer_nat_type,
                 my_nat_type,
@@ -2000,6 +2113,8 @@ impl Client {
                 token,
                 key,
                 pinned_rendezvous,
+                fixed_native: fixed_endpoint,
+                password_deployment: None,
             },
             true,
         ))
@@ -2014,6 +2129,7 @@ impl Client {
         relay_server: &str,
         rendezvous_server: &str,
         pinned_rendezvous: Option<PinnedRendezvous>,
+        relay_transport: Option<PinnedRendezvous>,
         punch_time_used: u64,
         peer_nat_type: NatType,
         my_nat_type: i32,
@@ -2168,6 +2284,7 @@ impl Client {
                     relay_server.to_owned(),
                     rendezvous_server,
                     pinned_rendezvous,
+                    relay_transport,
                     !signed_id_pk.is_empty(),
                     key,
                     &token,
@@ -2180,7 +2297,7 @@ impl Client {
                     interface.update_direct(Some(false));
                     bail!("Failed to connect via relay server: {}", e);
                 }
-                typ = if pinned_rendezvous.is_some() && matches!(&conn, Ok(Stream::WebSocket(_))) {
+                typ = if relay_transport.is_some() && matches!(&conn, Ok(Stream::WebSocket(_))) {
                     "WebSocket"
                 } else {
                     "Relay"
@@ -2217,6 +2334,7 @@ impl Client {
                     relay_server.to_owned(),
                     rendezvous_server,
                     pinned_rendezvous,
+                    relay_transport,
                     !signed_id_pk.is_empty(),
                     key,
                     &token,
@@ -2236,7 +2354,7 @@ impl Client {
                         .await
                         {
                             Ok(pk) => {
-                                typ = if pinned_rendezvous.is_some()
+                                typ = if relay_transport.is_some()
                                     && matches!(&relay_conn, Stream::WebSocket(_))
                                 {
                                     "WebSocket"
@@ -2443,6 +2561,7 @@ impl Client {
         relay_server: String,
         rendezvous_server: &str,
         pinned_rendezvous: Option<PinnedRendezvous>,
+        relay_transport: Option<PinnedRendezvous>,
         secure: bool,
         key: &str,
         token: &str,
@@ -2464,7 +2583,7 @@ impl Client {
 
         for i in 1..=3 {
             // use different socket due to current hbbs implementation requiring different nat address for each attempt
-            let socket = if let Some(transport) = pinned_rendezvous {
+            let socket = if let Some(transport) = relay_transport {
                 connect_pinned_rendezvous(rendezvous_server, transport).await
             } else {
                 connect_tcp(rendezvous_server, CONNECT_TIMEOUT).await
@@ -2508,6 +2627,12 @@ impl Client {
         if !succeed {
             bail!("Timeout");
         }
+        let peer_transport = peer_relay_transport(
+            pinned_rendezvous,
+            relay_transport,
+            rendezvous_server,
+            &relay_server,
+        );
         Self::create_relay(
             peer,
             uuid,
@@ -2515,7 +2640,7 @@ impl Client {
             key,
             conn_type,
             ipv4,
-            pinned_rendezvous.map(|transport| (rendezvous_server, transport)),
+            peer_transport.map(|transport| (rendezvous_server, transport)),
         )
         .await
     }
@@ -3486,9 +3611,13 @@ impl VideoHandler {
 // The source of sent password
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum PasswordSource {
-    PersonalAb(Vec<u8>),
+    PersonalAb(String),
     SharedAb(String),
-    AccountCredential,
+    AccountCredential(String),
+    Preset(Option<String>),
+    Builtin,
+    Remembered(Option<String>),
+    UnconfirmedOwner,
     Undefined,
 }
 
@@ -3499,35 +3628,27 @@ impl Default for PasswordSource {
 }
 
 impl PasswordSource {
-    // Whether the password is personal ab password
-    pub fn is_personal_ab(&self, password: &[u8]) -> bool {
-        if password.is_empty() {
-            return false;
-        }
+    fn account_binding(&self) -> Option<&str> {
         match self {
-            PasswordSource::PersonalAb(p) => p == password,
-            _ => false,
+            Self::PersonalAb(binding)
+            | Self::AccountCredential(binding)
+            | Self::SharedAb(binding) => Some(binding),
+            _ => None,
         }
     }
 
-    // Whether the password is shared ab password
-    pub fn is_shared_ab(&self, password: &[u8], hash: &Hash) -> bool {
-        if password.is_empty() {
-            return false;
-        }
-        match self {
-            PasswordSource::SharedAb(p) => Self::equal(p, password, hash),
-            _ => false,
-        }
+    fn reloads_for_new_challenge(&self) -> bool {
+        matches!(
+            self,
+            Self::PersonalAb(_) | Self::AccountCredential(_) | Self::UnconfirmedOwner
+        )
     }
 
-    //  Whether the password equals to the connected password
-    fn equal(password: &str, connected_password: &[u8], hash: &Hash) -> bool {
-        let mut hasher = Sha256::new();
-        hasher.update(password);
-        hasher.update(&hash.salt);
-        let res = hasher.finalize();
-        connected_password[..] == res[..]
+    fn remembered_owner(&self) -> Option<&str> {
+        match self {
+            Self::Remembered(owner) | Self::Preset(owner) => owner.as_deref(),
+            _ => None,
+        }
     }
 }
 
@@ -3544,10 +3665,32 @@ struct ConnToken {
     peer_relay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     password_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    password_session_owner: Option<String>,
 }
 
 const PEER_PASSWORD_SCOPE: &str = "saved-password-scope";
+const PEER_PASSWORD_OWNER: &str = "saved-password-owner";
+const PERSONAL_AB_PASSWORD_ROUTE_PROOF: &str = "personal-address-book-password-route-proof";
 const OS_PASSWORD_SCOPE: &str = "os-password-scope";
+
+pub(crate) fn peer_password_for_account<'a>(peer: &'a PeerConfig, owner: Option<&str>) -> &'a [u8] {
+    if owner.is_some_and(|owner| {
+        peer.options
+            .get(PEER_PASSWORD_OWNER)
+            .map_or(true, |saved| saved == owner)
+    }) {
+        &peer.password
+    } else {
+        &[]
+    }
+}
+
+struct SharedPassword {
+    password: String,
+    binding: String,
+    scope: Option<String>,
+}
 
 /// Login config handler for [`Client`].
 #[derive(Default)]
@@ -3555,25 +3698,17 @@ pub struct LoginConfigHandler {
     id: String,
     pub conn_type: ConnType,
     pub is_terminal_admin: bool,
-    hash: Hash,
     password: Vec<u8>, // remember password for reconnect
     password_scope: Option<String>,
+    password_revision: u64,
+    last_password_submission: u64,
+    preset_used: bool,
     pub remember: bool,
     login_method: login_method::LoginMethod,
     config: PeerConfig,
-    pub port_forward: (String, i32),
-    /// This login's `multiplex`, filled with `port_forward` under the turn
-    /// lock. `port_forward_mux` says whether a mapping probes for the tunnel;
-    /// one the probe latched to the raw pipe logs in without asking, so an
-    /// upgraded peer keeps giving it the raw pipe.
-    pub(crate) port_forward_multiplex: bool,
     /// Set once per window, before its mappings start: every accept's claim
     /// reads it.
     pub(crate) port_forward_mux: bool,
-    /// Held by a port-forward mapping from filling `port_forward` and `hash`
-    /// until its login is built from them; a window's mappings log in
-    /// concurrently.
-    pub(crate) port_forward_login_turn: Arc<hbb_common::tokio::sync::Mutex<()>>,
     pub version: i64,
     features: Option<Features>,
     pub session_id: u64, // used for local <-> server communication
@@ -3600,6 +3735,8 @@ pub struct LoginConfigHandler {
     pub(crate) expected_rendezvous: Option<ExpectedRendezvous>,
     pub(crate) confirmed_rendezvous: Option<String>,
     inherited_rendezvous: Option<String>,
+    account_password_rendezvous: Option<ExpectedRendezvous>,
+    password_session_owner: Option<String>,
     #[cfg(windows)]
     pub(crate) recent_connection: Option<crate::ui_session_interface::RecentConnection>,
     pub custom_fps: Arc<Mutex<Option<usize>>>,
@@ -3608,7 +3745,7 @@ pub struct LoginConfigHandler {
     pub selected_windows_session_id: Option<u32>,
     pub peer_info: Option<PeerInfo>,
     password_source: PasswordSource, // where the sent password comes from
-    shared_password: Option<String>, // Store the shared password
+    shared_password: Option<SharedPassword>,
     pub enable_trusted_devices: bool,
     pub record_state: bool,
     pub record_permission: bool,
@@ -3623,10 +3760,6 @@ impl Deref for LoginConfigHandler {
 }
 
 impl LoginConfigHandler {
-    pub(crate) fn set_hash(&mut self, hash: Hash) {
-        self.hash = hash;
-    }
-
     /// Initialize the login config handler.
     ///
     /// # Arguments
@@ -3695,28 +3828,28 @@ impl LoginConfigHandler {
 
         self.id = id;
         self.conn_type = conn_type;
+        self.preset_used = false;
         self.login_method = Default::default();
         if !login_method.is_empty() && !self.set_login_method(login_method) {
             log::warn!("Failed to initialize login method: {}", login_method);
         }
         self.config = self.load_config();
 
-        let mut sid = 0;
-        if let Some(token) = conn_token {
-            sid = token.session_id;
+        let sid = if let Some(token) = conn_token {
+            self.password_session_owner = token.password_session_owner;
             self.password = token.password; // use as last password
             self.password_source = token.password_source;
             self.password_scope = token.password_scope;
-        }
+            token.session_id
+        } else {
+            0
+        };
         self.remember = !self.saved_password().is_empty();
-        if sid == 0 {
-            sid = rand::random();
-            if sid == 0 {
-                // you won the lottery
-                sid = 1;
-            }
-        }
-        self.session_id = sid;
+        self.session_id = if sid == 0 {
+            rand::random::<u64>().max(1)
+        } else {
+            sid
+        };
         self.supported_encoding = Default::default();
         self.clear_restarting_remote_device();
         // Three scopes: what was decided about this PEER, what this CLIENT is set up as (proxy),
@@ -3746,7 +3879,15 @@ impl LoginConfigHandler {
         self.switch_uuid = switch_uuid;
         self.adapter_luid = adapter_luid;
         self.selected_windows_session_id = None;
-        self.shared_password = shared_password;
+        self.shared_password = shared_password.and_then(|input| {
+            let (password, binding) = serde_json::from_str::<(String, String)>(&input).ok()?;
+            (!password.is_empty() && crate::hbbs_http::password_account_is_current(&binding))
+                .then_some(SharedPassword {
+                    password,
+                    binding,
+                    scope: None,
+                })
+        });
         self.record_state = false;
         self.record_permission = true;
 
@@ -3811,13 +3952,68 @@ impl LoginConfigHandler {
         }
     }
 
+    fn remembered_password(&self) -> (Vec<u8>, PasswordSource) {
+        (
+            self.saved_password().to_vec(),
+            PasswordSource::Remembered(
+                self.config
+                    .options
+                    .get(PEER_PASSWORD_OWNER)
+                    .cloned(),
+            ),
+        )
+    }
+
+    fn take_password_preset(
+        &mut self,
+        password: &str,
+        hash: &Hash,
+        deployment: Option<&str>,
+    ) -> Option<(Vec<u8>, PasswordSource)> {
+        if self.preset_used || password.is_empty() {
+            return None;
+        }
+        self.preset_used = true;
+        let source = crate::hbbs_http::remembered_password_owner(deployment)
+            .map(PasswordSource::Preset)
+            .unwrap_or(PasswordSource::UnconfirmedOwner);
+        Some((password_with_salt(password, hash), source))
+    }
+
     fn use_password_scope(&mut self, scope: Option<&str>) {
         if self.password_scope.as_deref() != scope {
             self.password.clear();
             self.password_source = Default::default();
             self.password_scope = scope.map(str::to_owned);
+            self.account_password_rendezvous = None;
+            if self.password_session_owner.take().is_some() {
+                self.session_id = rand::random::<u64>().max(1);
+            }
+            self.password_revision = self.password_revision.wrapping_add(1);
             self.remember = !self.saved_password().is_empty();
         }
+    }
+
+    fn waits_for_newer_password(&self, trust: &crate::trusted_devices::client::Session) -> bool {
+        trust.port_forward.is_some() && self.last_password_submission > trust.password_submission
+    }
+
+    fn record_password_candidate(
+        &mut self,
+        password: &[u8],
+        source: PasswordSource,
+        cached_password_rejected: bool,
+        trust: &crate::trusted_devices::client::Session,
+    ) -> bool {
+        if self.password_revision != trust.password_revision {
+            return false;
+        }
+        // Another mapping may still be waiting for this candidate's authentication result.
+        if !cached_password_rejected || trust.port_forward.is_none() || self.password.is_empty() {
+            self.password = password.to_vec();
+            self.password_source = source;
+        }
+        true
     }
 
     /// Save a [`PeerConfig`] into the handler.
@@ -4457,25 +4653,106 @@ impl LoginConfigHandler {
         let mut config = self.load_config();
         config.info = serde;
         let password = &self.password;
-        let hash = self.hash.clone();
         let candidate: [u8; 32] = Sha256::digest(password).into();
-        let accepted_password = !password.is_empty()
-            && !matches!(self.password_source, PasswordSource::AccountCredential)
-            && self.password_scope == trust.password_scope
+        let current_attempt = self.password_scope == trust.password_scope
+            && self.password_revision == trust.password_revision;
+        let accepted_password = current_attempt
+            && !password.is_empty()
             && trust.password_attempt == Some(candidate)
             && !self.skips_saved_password();
-        if accepted_password {
-            if (self.remember && !self.password_source.is_shared_ab(password, &hash))
-                || (!self.remember && self.password_source.is_personal_ab(password))
-            {
-                config.password.clone_from(password);
-                if let Some(scope) = &self.password_scope {
-                    config.options.insert(PEER_PASSWORD_SCOPE.to_owned(), scope.clone());
-                } else {
-                    config.options.remove(PEER_PASSWORD_SCOPE);
+        if current_attempt {
+            let owner = if accepted_password {
+                self.password_source
+                    .remembered_owner()
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        let binding = self.password_source.account_binding()?;
+                        let (current_binding, owner) = crate::hbbs_http::current_password_account()?;
+                        (current_binding == binding).then_some(owner)
+                    })
+            } else {
+                None
+            };
+            if owner.is_none() && self.password_session_owner.is_some() {
+                self.session_id = rand::random::<u64>().max(1);
+            }
+            self.password_session_owner = owner;
+            self.account_password_rendezvous = trust
+                .password_rendezvous
+                .clone()
+                .filter(|_| self.password_session_owner.is_some())
+                .map(|mut route| {
+                    route.guard_only = self
+                        .expected_rendezvous
+                        .as_ref()
+                        .map_or(true, |expected| expected.guard_only);
+                    route
+                });
+        }
+        if accepted_password && trust.peer_public_key().is_some() {
+            if let (Some(scope), Some((binding, owner))) = (
+                &trust.password_scope,
+                crate::hbbs_http::current_password_account(),
+            ) {
+                let personal_password_verified = match &self.password_source {
+                    PasswordSource::PersonalAb(saved_binding) => {
+                        trust.password_account.as_ref() == Some(saved_binding)
+                            && *saved_binding == binding
+                    }
+                    PasswordSource::Remembered(saved_owner) => trust.entered_password
+                        && saved_owner.as_deref().map_or(true, |saved| saved == owner)
+                        && personal_ab_password_for(&self.id).is_some_and(|(hash, current)| {
+                            hash == *password && current == binding
+                        }),
+                    _ => false,
+                };
+                if personal_password_verified {
+                    config.options.insert(
+                        PERSONAL_AB_PASSWORD_ROUTE_PROOF.to_owned(),
+                        personal_ab_route_proof(scope, password, &owner),
+                    );
                 }
-            } else if !self.remember && self.password_scope_matches(&config) {
+            }
+        }
+        let remember_device_password = accepted_password
+            && self.password_source.account_binding().is_none()
+            && !matches!(
+                self.password_source,
+                PasswordSource::Builtin | PasswordSource::UnconfirmedOwner
+            );
+        if remember_device_password {
+            if self.remember {
+                let owner = match &self.password_source {
+                    PasswordSource::Remembered(owner) | PasswordSource::Preset(owner) => {
+                        Ok(owner.clone())
+                    }
+                    _ => crate::hbbs_http::remembered_password_owner(
+                        trust.password_deployment.as_deref(),
+                    ),
+                };
+                if let Ok(owner) = owner {
+                    config.password.clone_from(password);
+                    if let Some(scope) = &self.password_scope {
+                        config.options.insert(PEER_PASSWORD_SCOPE.to_owned(), scope.clone());
+                    } else {
+                        config.options.remove(PEER_PASSWORD_SCOPE);
+                    }
+                    if matches!(self.password_source, PasswordSource::Preset(_)) {
+                        self.password_source = PasswordSource::Remembered(owner.clone());
+                    }
+                    if let Some(owner) = owner {
+                        config.options.insert(PEER_PASSWORD_OWNER.to_owned(), owner);
+                    } else {
+                        config.options.remove(PEER_PASSWORD_OWNER);
+                    }
+                }
+            } else if !self.remember
+                && self.password_scope_matches(&config)
+                && config.options.get(PEER_PASSWORD_OWNER).map(String::as_str)
+                    == self.password_source.remembered_owner()
+            {
                 config.password.clear();
+                config.options.remove(PEER_PASSWORD_OWNER);
             }
         }
         if let Some((_, b, c)) = self.other_server.as_ref() {
@@ -4497,20 +4774,25 @@ impl LoginConfigHandler {
         #[cfg(feature = "flutter")]
         {
             // sync connected password to personal ab automatically if it is not shared password
-            if accepted_password
+            if remember_device_password
                 && self.password_scope_matches(&config)
                 && !config.password.is_empty()
-                && !self.password_source.is_shared_ab(password, &hash)
-                && !self.password_source.is_personal_ab(password)
             {
-                let hash = base64::encode(config.password.clone(), base64::Variant::Original);
-                let evt: HashMap<&str, String> = HashMap::from([
-                    ("name", "sync_peer_hash_password_to_personal_ab".to_string()),
-                    ("id", self.id.clone()),
-                    ("hash", hash),
-                ]);
-                let evt = serde_json::ser::to_string(&evt).unwrap_or("".to_owned());
-                crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, evt);
+                if let Some((binding, owner)) = crate::hbbs_http::current_password_account() {
+                    let password = peer_password_for_account(&config, Some(&owner));
+                    if !password.is_empty() {
+                        let evt = serde_json::json!({
+                            "name": "sync_peer_hash_password_to_personal_ab",
+                            "id": self.id,
+                            "hash": base64::encode(password, base64::Variant::Original),
+                            "account_binding": binding,
+                        });
+                        crate::flutter::push_global_event(
+                            crate::flutter::APP_TYPE_MAIN,
+                            evt.to_string(),
+                        );
+                    }
+                }
             }
         }
         if config.keyboard_mode.is_empty() {
@@ -4661,12 +4943,6 @@ impl LoginConfigHandler {
                 ..Default::default()
             }),
             ConnType::VIEW_CAMERA => lr.set_view_camera(Default::default()),
-            ConnType::PORT_FORWARD | ConnType::RDP => lr.set_port_forward(PortForward {
-                host: self.port_forward.0.clone(),
-                port: self.port_forward.1,
-                multiplex: self.port_forward_multiplex,
-                ..Default::default()
-            }),
             ConnType::TERMINAL => {
                 let mut terminal = Terminal::new();
                 terminal.service_id = self.get_option(self.get_key_terminal_service_id());
@@ -4730,31 +5006,50 @@ impl LoginConfigHandler {
     }
 
     pub fn get_conn_token(&self, connected: bool) -> Option<String> {
-        let password = if matches!(self.password_source, PasswordSource::AccountCredential) {
+        let password = if self.password_source.reloads_for_new_challenge() {
             Vec::new()
         } else {
             self.password.clone()
         };
         let has_password = !password.is_empty();
-        if !has_password && self.expected_rendezvous.is_none() {
+        let account_route = self
+            .account_password_rendezvous
+            .as_ref()
+            .filter(|_| connected && self.peer_info.is_some());
+        let account_password = self.password_source.account_binding().is_some()
+            || self.password_source.remembered_owner().is_some();
+        let inherit_session = (has_password || account_route.is_some())
+            && (!account_password || self.password_session_owner.is_some());
+        let expected = account_route.or(self.expected_rendezvous.as_ref());
+        if !has_password && expected.is_none() {
             return None;
         }
         serde_json::to_string(&ConnToken {
             password,
-            password_source: if has_password {
-                self.password_source.clone()
+            password_source: if has_password || inherit_session {
+                match &self.password_source {
+                    PasswordSource::Preset(owner) => PasswordSource::Remembered(owner.clone()),
+                    source => source.clone(),
+                }
             } else {
                 PasswordSource::default()
             },
-            session_id: if has_password { self.session_id } else { 0 },
-            scoped_target: self.expected_rendezvous.clone().map(|expected| (self.id.clone(), expected)),
-            confirmed_rendezvous: if connected && self.peer_info.is_some() && self.other_server.is_none() {
-                self.confirmed_rendezvous.clone()
+            session_id: if inherit_session { self.session_id } else { 0 },
+            scoped_target: expected.map(|expected| (self.id.clone(), expected.clone())),
+            confirmed_rendezvous: if connected && self.other_server.is_none() {
+                account_route.map(|route| route.server.clone()).or_else(|| {
+                    self.peer_info.as_ref().and(self.confirmed_rendezvous.clone())
+                })
             } else {
                 None
             },
-            peer_relay: self.expected_rendezvous.is_some() && self.peer_relay,
+            peer_relay: expected.is_some() && self.peer_relay,
             password_scope: self.password_scope.clone(),
+            password_session_owner: if inherit_session {
+                self.password_session_owner.clone()
+            } else {
+                None
+            },
         })
         .ok()
     }
@@ -5316,14 +5611,30 @@ pub fn handle_login_error(
     lc: Arc<RwLock<LoginConfigHandler>>,
     err: &str,
     interface: &impl Interface,
+    trust: &crate::trusted_devices::client::Session,
 ) -> bool {
-    if err == LOGIN_MSG_PASSWORD_EMPTY {
-        lc.write().unwrap().password = Default::default();
-        interface.msgbox("input-password", "Password Required", "", "");
-        true
-    } else if err == LOGIN_MSG_PASSWORD_WRONG {
-        lc.write().unwrap().password = Default::default();
-        interface.msgbox("re-input-password", err, "Do you want to enter again?", "");
+    if matches!(err, LOGIN_MSG_PASSWORD_EMPTY | LOGIN_MSG_PASSWORD_WRONG) {
+        {
+            let mut login = lc.write().unwrap();
+            if login.password_revision != trust.password_revision {
+                return true;
+            }
+            let attempt =
+                (!login.password.is_empty()).then(|| Sha256::digest(&login.password).into());
+            if trust.password_attempt == attempt {
+                login.password.clear();
+                login.password_source = PasswordSource::Undefined;
+                login.password_revision = login.password_revision.wrapping_add(1);
+                if err == LOGIN_MSG_PASSWORD_WRONG {
+                    login.shared_password = None;
+                }
+            }
+        }
+        if err == LOGIN_MSG_PASSWORD_EMPTY {
+            interface.msgbox("input-password", "Password Required", "", "");
+        } else {
+            interface.msgbox("re-input-password", err, "Do you want to enter again?", "");
+        }
         true
     } else if err == LOGIN_MSG_2FA_WRONG || err == REQUIRE_2FA {
         let enabled = lc.read().unwrap().get_option("trust-this-device") == "Y";
@@ -5453,15 +5764,9 @@ pub async fn handle_hash(
     peer: &mut Stream,
 ) -> bool {
     trust.password_attempt = None;
-    {
-        let mut login = lc.write().unwrap();
-        if matches!(login.password_source, PasswordSource::AccountCredential) {
-            login.password.clear();
-            login.password_source = PasswordSource::Undefined;
-        }
-        login.use_password_scope(trust.password_scope.as_deref());
-        login.hash = hash.clone();
-    }
+    trust.password_account = None;
+    trust.entered_password = false;
+    trust.challenge = hash.clone();
     // Take care of password application order
 
     // switch_uuid
@@ -5482,8 +5787,8 @@ pub async fn handle_hash(
                     log::warn!("Ignored untrusted switch_uuid");
                 } else {
                     lc.write().unwrap().allow_switch_back_once();
-                    send_switch_login_request(lc.clone(), peer, uuid).await;
-                    lc.write().unwrap().password_source = Default::default();
+                    send_switch_login_request(lc, peer, uuid, trust.password_scope.as_deref())
+                        .await;
                     return true;
                 }
             }
@@ -5502,57 +5807,101 @@ pub async fn handle_hash(
             return false;
         }
     }
-    // last password
-    let mut password = lc.read().unwrap().password.clone();
-    // preset password
-    if password.is_empty() {
-        if !password_preset.is_empty() {
-            let mut hasher = Sha256::new();
-            hasher.update(password_preset);
-            hasher.update(&hash.salt);
-            let res = hasher.finalize();
-            password = res[..].into();
-            lc.write().unwrap().password_source = Default::default();
+    let builtin_password =
+        crate::ui_interface::get_builtin_option(keys::OPTION_DEFAULT_CONNECT_PASSWORD);
+    let (mut password, mut source, request_approval, password_revision, submission) = {
+        let mut login = lc.write().unwrap();
+        login.use_password_scope(trust.password_scope.as_deref());
+        let request_approval = login.skips_saved_password();
+        let mut credential = if login.password_source.reloads_for_new_challenge() {
+            (Vec::new(), PasswordSource::Undefined)
+        } else {
+            (login.password.clone(), login.password_source.clone())
+        };
+        if credential.0.is_empty() && !request_approval {
+            if let Some(preset) = login.take_password_preset(
+                password_preset,
+                &hash,
+                trust.password_deployment.as_deref(),
+            ) {
+                credential = preset;
+                trust.entered_password = true;
+            }
+        }
+        if credential.0.is_empty() && !request_approval {
+            if let Some(shared) = &mut login.shared_password {
+                let actual = trust.password_scope.as_deref().unwrap_or_default();
+                let scope = shared.scope.get_or_insert_with(|| actual.to_owned());
+                if scope == actual && !shared.password.is_empty() {
+                    credential = (
+                        password_with_salt(&shared.password, &hash),
+                        PasswordSource::SharedAb(shared.binding.clone()),
+                    );
+                }
+            }
+        }
+        if credential.0.is_empty() {
+            credential = login.remembered_password();
+        }
+        (
+            credential.0,
+            credential.1,
+            request_approval,
+            login.password_revision,
+            login.last_password_submission,
+        )
+    };
+    trust.password_revision = password_revision;
+    trust.password_submission = submission;
+    let mut verification = Default::default();
+    let mut cached_password_rejected = false;
+    if !password.is_empty() && !request_approval && !trust.entered_password {
+        match authorize_cached_password(&source, trust, &mut verification).await {
+            Ok(account) => trust.password_account = account,
+            Err(()) => {
+                cached_password_rejected = true;
+                password.clear();
+                source = PasswordSource::Undefined;
+            }
         }
     }
-    // shared password
-    // Currently it's used only when click shared ab peer card
-    let shared_password = lc.write().unwrap().shared_password.take();
-    if let Some(shared_password) = shared_password {
-        if !shared_password.is_empty() {
-            let mut hasher = Sha256::new();
-            hasher.update(shared_password.clone());
-            hasher.update(&hash.salt);
-            let res = hasher.finalize();
-            password = res[..].into();
-            lc.write().unwrap().password_source = PasswordSource::SharedAb(shared_password);
+    if password.is_empty() && !request_approval {
+        if let Some((hash_password, binding)) =
+            personal_ab_password(&lc, trust.password_scope.as_deref())
+        {
+            let personal = PasswordSource::PersonalAb(binding);
+            if let Ok(account) = authorize_cached_password(&personal, trust, &mut verification).await {
+                (password, source) = (hash_password, personal);
+                trust.password_account = account;
+            }
         }
     }
-    // peer config password
     if password.is_empty() {
-        password = lc.read().unwrap().saved_password().to_vec();
-        if !password.is_empty() {
-            lc.write().unwrap().password_source = Default::default();
+        let preset = if !request_approval && !password_preset.is_empty() {
+            let mut login = lc.write().unwrap();
+            if login.password_revision == password_revision {
+                login.take_password_preset(
+                    password_preset,
+                    &hash,
+                    trust.password_deployment.as_deref(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(preset) = preset {
+            (password, source) = preset;
+            trust.entered_password = true;
+            cached_password_rejected = false;
+        } else if !builtin_password.is_empty() {
+            password = password_with_salt(&builtin_password, &hash);
+            source = PasswordSource::Builtin;
         }
-    }
-    // personal ab password
-    if password.is_empty() {
-        try_get_password_from_personal_ab(lc.clone(), &mut password);
     }
 
-    if password.is_empty() {
-        let p = crate::ui_interface::get_builtin_option(keys::OPTION_DEFAULT_CONNECT_PASSWORD);
-        if !p.is_empty() {
-            let mut hasher = Sha256::new();
-            hasher.update(p.clone());
-            hasher.update(&hash.salt);
-            let res = hasher.finalize();
-            password = res[..].into();
-            lc.write().unwrap().password_source = PasswordSource::SharedAb(p); // reuse SharedAb here
-        }
-    }
-
-    if password.is_empty() && peer.is_secured() && !lc.read().unwrap().skips_saved_password() {
+    if password.is_empty() && peer.is_secured() && !request_approval {
         let (id, target, session_id) = {
             let login = lc.read().unwrap();
             (
@@ -5561,19 +5910,21 @@ pub async fn handle_hash(
                 login.session_id,
             )
         };
-        if let Some(key) = trust.peer_public_key() {
-            if let Some((credential, mut route)) = crate::hbbs_http::device_credential::resolve(
-                &id, &hash.salt, key, trust.password_scope.as_deref(),
-            ).await {
+        if let (Some(key), Some(actual_route)) =
+            (trust.peer_public_key(), trust.password_rendezvous.as_ref())
+        {
+            if let Some((credential, route, binding)) =
+                crate::hbbs_http::device_credential::resolve(&id, &hash.salt, key, actual_route).await
+            {
                 let mut login = lc.write().unwrap();
                 if login.id == target && login.session_id == session_id
-                    && login.password_scope == trust.password_scope && !login.skips_saved_password()
-                    && login.password.is_empty()
+                    && login.password_revision == password_revision
+                    && !login.skips_saved_password()
                 {
                     password = credential;
-                    login.password_source = PasswordSource::AccountCredential;
+                    trust.password_account = Some(binding.clone());
+                    source = PasswordSource::AccountCredential(binding);
                     if login.expected_rendezvous.is_none() {
-                        route.guard_only = true;
                         login.expected_rendezvous = Some(route);
                     }
                 }
@@ -5581,13 +5932,14 @@ pub async fn handle_hash(
         }
     }
 
-    lc.write().unwrap().password = password.clone();
-
-    let request_approval = lc.read().unwrap().skips_saved_password();
+    let revision_current =
+        lc.write()
+            .unwrap()
+            .record_password_candidate(&password, source, cached_password_rejected, trust);
 
     let is_terminal_admin = lc.read().unwrap().is_terminal_admin;
     let is_terminal = lc.read().unwrap().conn_type.eq(&ConnType::TERMINAL);
-    if is_terminal && is_terminal_admin {
+    if revision_current && is_terminal && is_terminal_admin {
         if request_approval {
             interface.msgbox("terminal-admin-login-request-approval", "", "", "");
         } else if password.is_empty() {
@@ -5595,13 +5947,12 @@ pub async fn handle_hash(
         } else {
             interface.msgbox("terminal-admin-login", "", "", "");
         }
-        lc.write().unwrap().hash = hash;
         return true;
     }
 
-    let password = if password.is_empty() {
+    let password = if !revision_current || password.is_empty() {
         // login without password, the remote side can click accept
-        if !request_approval {
+        if revision_current && !request_approval {
             interface.msgbox("input-password", "Password Required", "", "");
         }
         Vec::new()
@@ -5613,7 +5964,7 @@ pub async fn handle_hash(
         hasher.finalize()[..].into()
     };
 
-    if request_approval {
+    if revision_current && request_approval {
         interface.msgbox(
             "wait-remote-accept-nook",
             "Prompt",
@@ -5622,56 +5973,125 @@ pub async fn handle_hash(
         );
     }
 
-    if let Err(error) = send_login(
+    match send_login(
         lc.clone(),
         String::new(),
         String::new(),
         password,
         trust,
         peer,
+        &mut verification,
     )
     .await
     {
-        interface.on_error(&error.to_string());
-        return false;
+        Ok(LoginSend::Sent) => true,
+        Ok(LoginSend::Superseded { awaiting_input }) => awaiting_input,
+        Ok(LoginSend::AccountChanged) => {
+            interface.msgbox("input-password", "Password Required", "", "");
+            true
+        }
+        Err(error) => {
+            interface.on_error(&error.to_string());
+            false
+        }
     }
-    lc.write().unwrap().hash = hash;
-    true
 }
 
-#[inline]
-fn try_get_password_from_personal_ab(lc: Arc<RwLock<LoginConfigHandler>>, password: &mut Vec<u8>) {
+async fn authorize_cached_password(
+    source: &PasswordSource,
+    trust: &crate::trusted_devices::client::Session,
+    verification: &mut crate::hbbs_http::PasswordAccountVerification,
+) -> Result<Option<String>, ()> {
+    if matches!(
+        source,
+        PasswordSource::Preset(None) | PasswordSource::Builtin | PasswordSource::Remembered(None)
+    ) {
+        return Ok(None);
+    }
+    if matches!(source, PasswordSource::UnconfirmedOwner)
+        || (matches!(source, PasswordSource::PersonalAb(_)) && trust.peer_public_key().is_none())
     {
+        return Err(());
+    }
+    crate::hbbs_http::authorize_cached_device_password(
+        trust.password_deployment.as_deref(),
+        source.account_binding(),
+        source.remembered_owner(),
+        verification,
+    )
+    .await
+}
+
+fn personal_ab_password(
+    lc: &RwLock<LoginConfigHandler>,
+    scope: Option<&str>,
+) -> Option<(Vec<u8>, String)> {
+    let (account_binding, owner) = crate::hbbs_http::current_password_account()?;
+    let (id, known_route, saved, unsaved_default_peer) = {
         let login = lc.read().unwrap();
+        let known_route = login.config.options.get(PERSONAL_AB_PASSWORD_ROUTE_PROOF).cloned();
         let unsaved_default_peer = login.other_server.is_none()
             && login.expected_rendezvous.is_none()
             && login.config.password.is_empty()
-            && !login.config.options.contains_key(PEER_PASSWORD_SCOPE);
-        if !login.password_scope_matches(&login.config) && !unsaved_default_peer {
-            return;
-        }
+            && known_route.is_none()
+            && !login.config.options.contains_key(PEER_PASSWORD_SCOPE)
+            && !login.config.options.contains_key(OS_PASSWORD_SCOPE);
+        let saved = (scope == login.config.options.get(PEER_PASSWORD_SCOPE).map(String::as_str))
+            .then(|| peer_password_for_account(&login.config, Some(&owner)).to_vec());
+        (login.id.clone(), known_route, saved, unsaved_default_peer)
+    };
+    let (password, binding) = personal_ab_password_for(&id)?;
+    if binding != account_binding {
+        return None;
     }
-    let access_token = LocalConfig::get_option("access_token");
+    if unsaved_default_peer
+        || saved.as_ref() == Some(&password)
+        || known_route
+            .zip(scope)
+            .is_some_and(|(known, scope)| known == personal_ab_route_proof(scope, &password, &owner))
+    {
+        Some((password, binding))
+    } else {
+        None
+    }
+}
+
+fn personal_ab_route_proof(scope: &str, password: &[u8], owner: &str) -> String {
+    hex::encode(
+        Sha256::new()
+            .chain_update(scope)
+            .chain_update(owner)
+            .chain_update(password)
+            .finalize(),
+    )
+}
+
+pub(crate) fn personal_ab_password_for(id: &str) -> Option<(Vec<u8>, String)> {
+    if config::is_disable_account() {
+        return None;
+    }
+    let [token, binding] = crate::hbbs_http::confirmed_account_options()?;
     let ab = config::Ab::load();
-    if !access_token.is_empty() && access_token == ab.access_token {
-        let id = lc.read().unwrap().id.clone();
-        if let Some(ab) = ab.ab_entries.iter().find(|a| a.personal()) {
-            if let Some(p) = ab
-                .peers
-                .iter()
-                .find_map(|p| if p.id == id { Some(p) } else { None })
-            {
-                if let Ok(hash_password) = base64::decode(p.hash.clone(), base64::Variant::Original)
-                {
-                    if !hash_password.is_empty() {
-                        *password = hash_password.clone();
-                        lc.write().unwrap().password_source =
-                            PasswordSource::PersonalAb(hash_password);
-                    }
-                }
-            }
-        }
+    if token != ab.access_token {
+        return None;
     }
+    let entry = ab.ab_entries.iter().find(|entry| entry.personal())?;
+    let peer = entry.peers.iter().find(|peer| peer.id == id)?;
+    let password = base64::decode(&peer.hash, base64::Variant::Original).ok()?;
+    (!password.is_empty()).then_some((password, binding))
+}
+
+fn password_with_salt(password: &str, hash: &Hash) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(password);
+    hasher.update(&hash.salt);
+    hasher.finalize().to_vec()
+}
+
+enum LoginSend {
+    Sent,
+    Superseded { awaiting_input: bool },
+    AccountChanged,
 }
 
 /// Send login message to peer.
@@ -5685,21 +6105,104 @@ fn try_get_password_from_personal_ab(lc: Arc<RwLock<LoginConfigHandler>>, passwo
 /// * `peer` - [`Stream`] for communicating with peer.
 async fn send_login(
     lc: Arc<RwLock<LoginConfigHandler>>,
-    os_username: String,
-    os_password: String,
-    password: Vec<u8>,
+    mut os_username: String,
+    mut os_password: String,
+    mut password: Vec<u8>,
     trust: &mut crate::trusted_devices::client::Session,
     peer: &mut Stream,
-) -> ResultType<()> {
-    let msg_out = lc
-        .read()
-        .unwrap()
-        .create_login_msg(os_username, os_password, password);
-    if msg_out.login_request().password.is_empty() {
-        trust.password_attempt = None;
+    verification: &mut crate::hbbs_http::PasswordAccountVerification,
+) -> ResultType<LoginSend> {
+    let mut superseded_revision = None;
+    'prepare: loop {
+        let mut msg_out = {
+            let mut login = lc.write().unwrap();
+            if login.password_revision != trust.password_revision {
+                trust.password_attempt = None;
+                if login.waits_for_newer_password(trust) {
+                    return Ok(LoginSend::Superseded { awaiting_input: true });
+                }
+                if trust.port_forward.is_none()
+                    || login.password_scope != trust.password_scope
+                    || !login.password.is_empty()
+                {
+                    return Ok(LoginSend::Superseded { awaiting_input: false });
+                }
+                if trust.login_request_sent {
+                    return Ok(LoginSend::Superseded { awaiting_input: true });
+                }
+                // This mapping still needs its first request to enable remote acceptance.
+                superseded_revision.get_or_insert(trust.password_revision);
+                trust.password_revision = login.password_revision;
+                trust.password_submission = login.last_password_submission;
+                trust.password_account = None;
+                trust.entered_password = false;
+                password.clear();
+                os_username.clear();
+                os_password.clear();
+            }
+            login.create_login_msg(
+                std::mem::take(&mut os_username),
+                std::mem::take(&mut os_password),
+                std::mem::take(&mut password),
+            )
+        };
+        if let (Some(port_forward), Some(message::Union::LoginRequest(login))) =
+            (&trust.port_forward, msg_out.union.as_mut())
+        {
+            login.set_port_forward(port_forward.clone());
+        }
+        if msg_out.login_request().password.is_empty() {
+            trust.password_attempt = None;
+        }
+        let mut msg_out = trust.login(msg_out).await?;
+        let (session_id, account_changed) = loop {
+            let session_owner = lc.read().unwrap().password_session_owner.clone();
+            let session_account = if let Some(owner) = session_owner.as_deref() {
+                crate::hbbs_http::authorize_cached_device_password(
+                    trust.password_deployment.as_deref(),
+                    None,
+                    Some(owner),
+                    verification,
+                )
+                .await
+                .ok()
+                .flatten()
+            } else {
+                None
+            };
+            let account_changed = trust
+                .password_account
+                .as_deref()
+                .is_some_and(|account| !crate::hbbs_http::password_account_is_current(account));
+            let original_account_is_current = session_account
+                .as_deref()
+                .is_some_and(crate::hbbs_http::password_account_is_current);
+            let mut login = lc.write().unwrap();
+            if login.password_revision != trust.password_revision {
+                continue 'prepare;
+            }
+            // A mapping may confirm the owner while another is waiting for account verification.
+            if login.password_session_owner != session_owner {
+                continue;
+            }
+            if session_owner.is_some() && !original_account_is_current {
+                login.password_session_owner = None;
+                login.session_id = rand::random::<u64>().max(1);
+            }
+            break (login.session_id, account_changed);
+        };
+        msg_out.mut_login_request().session_id = session_id;
+        if account_changed {
+            trust.password_attempt = None;
+            return Ok(LoginSend::AccountChanged);
+        }
+        peer.send(&msg_out).await?;
+        if let Some(revision) = superseded_revision {
+            trust.password_revision = revision;
+        }
+        trust.login_request_sent = true;
+        return Ok(LoginSend::Sent);
     }
-    let msg_out = trust.login(msg_out).await?;
-    peer.send(&msg_out).await
 }
 
 /// Handle login request made from ui.
@@ -5714,66 +6217,147 @@ async fn send_login(
 /// * `peer` - [`Stream`] for communicating with peer.
 pub async fn handle_login_from_ui(
     lc: Arc<RwLock<LoginConfigHandler>>,
-    os_username: String,
-    os_password: String,
-    password: String,
-    remember: bool,
+    input: UiLogin,
+    interface: &impl Interface,
     trust: &mut crate::trusted_devices::client::Session,
     peer: &mut Stream,
-) -> ResultType<()> {
-    lc.write().unwrap().use_password_scope(trust.password_scope.as_deref());
-    let mut hash_password = if password.is_empty() {
-        let mut password2 = lc.read().unwrap().password.clone();
-        if password2.is_empty() {
-            password2 = lc.read().unwrap().saved_password().to_vec();
-            if !password2.is_empty() {
-                lc.write().unwrap().password_source = Default::default();
-            }
+) -> ResultType<bool> {
+    let UiLogin {
+        os_username,
+        os_password,
+        password,
+        remember,
+        submission,
+    } = input;
+    let (
+        mut hash_password,
+        mut source,
+        request_approval,
+        terminal_admin,
+        password_revision,
+        password_submission,
+    ) = {
+        let mut login = lc.write().unwrap();
+        if submission < login.last_password_submission {
+            return Ok(trust.port_forward.is_some());
         }
-        password2
-    } else {
-        lc.write().unwrap().password_source = Default::default();
-        let mut hasher = Sha256::new();
-        hasher.update(password);
-        hasher.update(&lc.read().unwrap().hash.salt);
-        let res = hasher.finalize();
-        lc.write().unwrap().remember = remember;
-        res[..].into()
+        login.use_password_scope(trust.password_scope.as_deref());
+        let (candidate, source) = if !password.is_empty() {
+            login.remember = remember;
+            if submission != login.last_password_submission {
+                login.last_password_submission = submission;
+                login.password_revision = login.password_revision.wrapping_add(1);
+            }
+            (
+                password_with_salt(&password, &trust.challenge),
+                crate::hbbs_http::remembered_password_owner(trust.password_deployment.as_deref())
+                    .map(PasswordSource::Remembered)
+                    .unwrap_or(PasswordSource::UnconfirmedOwner),
+            )
+        } else if login.password.is_empty() {
+            login.remembered_password()
+        } else {
+            (login.password.clone(), login.password_source.clone())
+        };
+        (
+            candidate,
+            source,
+            login.skips_saved_password(),
+            login.conn_type == ConnType::TERMINAL && login.is_terminal_admin,
+            login.password_revision,
+            login.last_password_submission,
+        )
     };
-    trust.password_attempt =
-        (!hash_password.is_empty()).then(|| Sha256::digest(&hash_password).into());
-    lc.write().unwrap().password = hash_password.clone();
-    let mut hasher2 = Sha256::new();
-    hasher2.update(&hash_password[..]);
-    hasher2.update(&lc.read().unwrap().hash.challenge);
-    hash_password = hasher2.finalize()[..].to_vec();
+    // Terminal elevation can defer the first explicit device password until the OS prompt.
+    let pending_preset = terminal_admin
+        && password.is_empty()
+        && trust.entered_password
+        && !trust.login_request_sent
+        && trust.password_revision == password_revision
+        && matches!(
+            source,
+            PasswordSource::Preset(_) | PasswordSource::UnconfirmedOwner
+        );
+    trust.password_revision = password_revision;
+    trust.password_submission = password_submission;
+    trust.password_account = None;
+    trust.entered_password = !password.is_empty() || pending_preset;
+    let mut cached_password_rejected = false;
+    let mut verification = Default::default();
+    if !trust.entered_password && !hash_password.is_empty() && !request_approval {
+        match authorize_cached_password(&source, trust, &mut verification).await {
+            Ok(account) => trust.password_account = account,
+            Err(()) => cached_password_rejected = true,
+        }
+    }
+    if cached_password_rejected {
+        hash_password.clear();
+        source = PasswordSource::Undefined;
+    }
+    let revision_current = lc.write().unwrap().record_password_candidate(
+        &hash_password,
+        source,
+        cached_password_rejected,
+        trust,
+    );
+    if revision_current && cached_password_rejected && terminal_admin {
+        interface.msgbox("terminal-admin-login-password", "", "", "");
+        return Ok(true);
+    }
+    trust.password_attempt = (revision_current && !hash_password.is_empty())
+        .then(|| Sha256::digest(&hash_password).into());
+    if !revision_current {
+        hash_password.clear();
+    } else if !cached_password_rejected {
+        let mut hasher = Sha256::new();
+        hasher.update(&hash_password);
+        hasher.update(&trust.challenge.challenge);
+        hash_password = hasher.finalize().to_vec();
+    }
 
-    send_login(
-        lc.clone(),
+    match send_login(
+        lc,
         os_username,
         os_password,
         hash_password,
         trust,
         peer,
+        &mut verification,
     )
-    .await
+    .await?
+    {
+        LoginSend::Sent => Ok(true),
+        LoginSend::Superseded { awaiting_input } => Ok(awaiting_input),
+        LoginSend::AccountChanged => {
+            if terminal_admin {
+                interface.msgbox("terminal-admin-login-password", "", "", "");
+            } else {
+                interface.msgbox("input-password", "Password Required", "", "");
+            }
+            Ok(true)
+        }
+    }
 }
 
 async fn send_switch_login_request(
     lc: Arc<RwLock<LoginConfigHandler>>,
     peer: &mut Stream,
     uuid: Uuid,
+    scope: Option<&str>,
 ) {
+    let request = {
+        let mut login = lc.write().unwrap();
+        login.use_password_scope(scope);
+        login.password_source = Default::default();
+        login
+            .create_login_msg(String::new(), String::new(), Vec::new())
+            .login_request()
+            .clone()
+    };
     let mut msg_out = Message::new();
     msg_out.set_switch_sides_response(SwitchSidesResponse {
         uuid: Bytes::from(uuid.as_bytes().to_vec()),
-        lr: hbb_common::protobuf::MessageField::some(
-            lc.read()
-                .unwrap()
-                .create_login_msg("".to_owned(), "".to_owned(), vec![])
-                .login_request()
-                .to_owned(),
-        ),
+        lr: hbb_common::protobuf::MessageField::some(request),
         ..Default::default()
     });
     allow_err!(peer.send(&msg_out).await);
@@ -5785,7 +6369,11 @@ pub trait Interface: Send + Clone + 'static + Sized {
     /// Send message data to remote peer.
     fn send(&self, data: Data);
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str);
-    fn handle_login_error(&self, err: &str) -> bool;
+    fn handle_login_error(
+        &self,
+        err: &str,
+        trust: &crate::trusted_devices::client::Session,
+    ) -> bool;
     fn handle_peer_info(&self, pi: PeerInfo, trust: &crate::trusted_devices::client::Session);
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
     fn on_error(&self, err: &str) {
@@ -5800,13 +6388,10 @@ pub trait Interface: Send + Clone + 'static + Sized {
     ) -> bool;
     async fn handle_login_from_ui(
         &self,
-        os_username: String,
-        os_password: String,
-        password: String,
-        remember: bool,
+        input: UiLogin,
         trust: &mut crate::trusted_devices::client::Session,
         peer: &mut Stream,
-    );
+    ) -> bool;
     async fn handle_test_delay(&self, t: TestDelay, peer: &mut Stream);
 
     fn get_lch(&self) -> Arc<RwLock<LoginConfigHandler>>;
@@ -5885,12 +6470,40 @@ pub trait Interface: Send + Clone + 'static + Sized {
     }
 }
 
+#[derive(Clone)]
+pub struct UiLogin {
+    os_username: String,
+    os_password: String,
+    password: String,
+    remember: bool,
+    submission: u64,
+}
+
+impl UiLogin {
+    pub(crate) fn new(
+        os_username: String,
+        os_password: String,
+        password: String,
+        remember: bool,
+    ) -> Self {
+        // A password prompt is broadcast to every mapping in its window.
+        static NEXT_SUBMISSION: AtomicU64 = AtomicU64::new(1);
+        Self {
+            os_username,
+            os_password,
+            password,
+            remember,
+            submission: NEXT_SUBMISSION.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
 /// Data used by the client interface.
 #[derive(Clone)]
 pub enum Data {
     Close,
     RejectInsecureConnection,
-    Login((String, String, String, bool)),
+    Login(UiLogin),
     Message(Message),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     InitialClipboard(usize, Option<Message>),
@@ -6154,6 +6767,7 @@ pub async fn hc_connection(
         token,
         key,
         pinned_rendezvous,
+        fixed_native,
         ..
     } = rendezvous;
     if feedback == 0 || rendezvous_server.is_empty() || token.is_empty() {
@@ -6161,7 +6775,9 @@ pub async fn hc_connection(
     }
     let (tx, rx) = unbounded_channel::<()>();
     tokio::spawn(async move {
-        allow_err!(hc_connection_(rendezvous_server, rx, token, key, pinned_rendezvous).await);
+        allow_err!(
+            hc_connection_(rendezvous_server, rx, token, key, pinned_rendezvous, fixed_native).await
+        );
     });
     Some(tx)
 }
@@ -6172,6 +6788,7 @@ async fn hc_connection_(
     token: String,
     key: String,
     pinned_rendezvous: Option<PinnedRendezvous>,
+    fixed_native: bool,
 ) -> ResultType<()> {
     let mut timer = crate::capylink_interval(interval(crate::TIMER_OUT));
     let mut last_recv_msg = Instant::now();
@@ -6180,25 +6797,30 @@ async fn hc_connection_(
     let host = check_port(&rendezvous_server, RENDEZVOUS_PORT);
     let verified_wss = matches!(pinned_rendezvous, Some(PinnedRendezvous::VerifiedWss));
     let mut conn = if let Some(transport) = pinned_rendezvous {
-        let mut conn = connect_pinned_rendezvous(&host, transport).await?;
-        if matches!(transport, PinnedRendezvous::Tcp)
-            && !crate::common::key_exchange(&mut conn, &key, true).await?
-        {
-            return Ok(());
-        }
-        conn
+        connect_pinned_rendezvous(&host, transport).await?
+    } else if host.contains("://") {
+        connect_tcp(host, CONNECT_TIMEOUT).await?
     } else {
-        let mut conn = if host.contains("://") {
-            connect_tcp(host, CONNECT_TIMEOUT).await?
-        } else {
-            connect_tcp_local(host, None, CONNECT_TIMEOUT).await?
-        };
-        crate::secure_tcp(&mut conn, &key).await?;
-        conn
+        connect_tcp_local(host, None, CONNECT_TIMEOUT).await?
     };
     let pinned = pinned_rendezvous.is_some();
-    if (pinned && !verified_wss && !conn.is_secured())
-        || !crate::hbbs_http::account_token_matches(&token, &rendezvous_server, &key, pinned).await
+    let fixed_tcp = (pinned || fixed_native) && matches!(&conn, Stream::Tcp(_));
+    if fixed_tcp {
+        if !crate::common::key_exchange(&mut conn, &key, true).await? {
+            return Ok(());
+        }
+    } else if !pinned {
+        crate::secure_tcp(&mut conn, &key).await?;
+    }
+    if (((pinned && !verified_wss) || fixed_tcp) && !conn.is_secured())
+        || !crate::hbbs_http::account_token_matches(
+            &token,
+            &rendezvous_server,
+            &key,
+            pinned,
+            fixed_native,
+        )
+        .await
     {
         return Ok(());
     }

@@ -151,11 +151,9 @@ pub(crate) async fn collect() {
     let mut connection = None;
     loop {
         tokio::select! { _ = interval.tick() => {}, _ = SOURCE_CHANGED.notified() => {} }
-        let [token, binding] =
-            LocalConfig::get_options([super::ACCESS_TOKEN, super::ACCESS_TOKEN_DEPLOYMENT]);
-        if token.is_empty() || binding.is_empty() {
+        let Some([token, binding]) = super::confirmed_account_options() else {
             continue;
-        }
+        };
         let options = async {
             if connection.is_none() {
                 connection = Some(crate::ipc::connect(1000, "").await?);
@@ -199,11 +197,13 @@ pub(crate) async fn collect() {
         }
         let peers = if full || !ids.is_empty() {
             let filters = (!full).then_some(ids.clone());
+            let owner =
+                super::password_owner(&deployment, &binding, super::account_id_for_binding(&binding));
             match tokio::task::spawn_blocking(move || {
                 PeerConfig::peers(filters)
                     .into_iter()
                     .map(|(id, _, config)| {
-                        crate::ui_interface::peer_to_map(id, config)
+                        crate::ui_interface::peer_to_map(id, config, Some(&owner))
                             .into_iter()
                             .map(|(key, value)| (key.to_owned(), value))
                             .collect()

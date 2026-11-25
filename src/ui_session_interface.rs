@@ -45,7 +45,7 @@ use crate::client::io_loop::Remote;
 use crate::client::{
     check_if_retry, handle_hash, handle_login_error, handle_login_from_ui, handle_test_delay,
     input_os_password, send_mouse, send_pointer_device_event, FileManager, Key, LoginConfigHandler,
-    QualityStatus, KEY_MAP,
+    QualityStatus, UiLogin, KEY_MAP,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::common::GrabState;
@@ -1676,7 +1676,12 @@ impl<T: InvokeUiSession> Session<T> {
         password: String,
         remember: bool,
     ) {
-        self.send(Data::Login((os_username, os_password, password, remember)));
+        self.send(Data::Login(UiLogin::new(
+            os_username,
+            os_password,
+            password,
+            remember,
+        )));
     }
 
     pub fn send2fa(&self, code: String, trust_this_device: bool) {
@@ -2078,8 +2083,12 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         self.ui_handler.msgbox(msgtype, title, text, link, retry);
     }
 
-    fn handle_login_error(&self, err: &str) -> bool {
-        handle_login_error(self.lc.clone(), err, self)
+    fn handle_login_error(
+        &self,
+        err: &str,
+        trust: &crate::trusted_devices::client::Session,
+    ) -> bool {
+        handle_login_error(self.lc.clone(), err, self, trust)
     }
 
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>) {
@@ -2181,24 +2190,23 @@ impl<T: InvokeUiSession> Interface for Session<T> {
 
     async fn handle_login_from_ui(
         &self,
-        os_username: String,
-        os_password: String,
-        password: String,
-        remember: bool,
+        input: UiLogin,
         trust: &mut crate::trusted_devices::client::Session,
         peer: &mut Stream,
-    ) {
-        if let Err(error) = handle_login_from_ui(
+    ) -> bool {
+        match handle_login_from_ui(
             self.lc.clone(),
-            os_username,
-            os_password,
-            password,
-            remember,
+            input,
+            self,
             trust,
             peer,
         )
         .await {
-            self.on_error(&error.to_string());
+            Ok(active) => active,
+            Err(error) => {
+                self.on_error(&error.to_string());
+                false
+            }
         }
     }
 

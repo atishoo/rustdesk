@@ -434,9 +434,14 @@ class FfiModel with ChangeNotifier {
         if (desktopType == DesktopType.main || isWeb || isMobile) {
           final id = evt['id'];
           final hash = evt['hash'];
-          if (id != null && hash != null) {
-            gFFI.abModel
-                .changePersonalHashPassword(id.toString(), hash.toString());
+          final binding = evt['account_binding'];
+          if (id != null &&
+              hash != null &&
+              binding is String &&
+              binding.isNotEmpty) {
+            gFFI.abModel.changePersonalHashPassword(
+                id.toString(), hash.toString(),
+                accountBinding: binding);
           }
         }
       } else if (name == "cm_file_transfer_log") {

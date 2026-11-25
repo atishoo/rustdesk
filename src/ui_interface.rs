@@ -845,7 +845,11 @@ pub fn discover() {
 }
 
 #[cfg(feature = "flutter")]
-pub fn peer_to_map(id: String, p: PeerConfig) -> HashMap<&'static str, String> {
+pub fn peer_to_map(
+    id: String,
+    p: PeerConfig,
+    password_owner: Option<&str>,
+) -> HashMap<&'static str, String> {
     use hbb_common::sodiumoxide::base64;
     HashMap::<&str, String>::from_iter([
         ("id", id),
@@ -858,7 +862,10 @@ pub fn peer_to_map(id: String, p: PeerConfig) -> HashMap<&'static str, String> {
         ),
         (
             "hash",
-            base64::encode(p.password, base64::Variant::Original),
+            base64::encode(
+                crate::client::peer_password_for_account(&p, password_owner),
+                base64::Variant::Original,
+            ),
         ),
     ])
 }

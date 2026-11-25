@@ -218,7 +218,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 );
                 match trust {
                     Ok(mut trust) => {
-                        trust.password_scope = rendezvous.password_scope();
+                        rendezvous.configure_password_route(&mut trust);
                         self.trusted_device = trust;
                         self.handler.lc.write().unwrap().enable_trusted_devices = false;
                     }
@@ -761,17 +761,13 @@ impl<T: InvokeUiSession> Remote<T> {
                 self.send_close_reason(peer, "").await;
                 return false;
             }
-            Data::Login((os_username, os_password, password, remember)) => {
-                self.handler
-                    .handle_login_from_ui(
-                        os_username,
-                        os_password,
-                        password,
-                        remember,
-                        &mut self.trusted_device,
-                        peer,
-                    )
-                    .await;
+            Data::Login(input) => {
+                if !self.handler
+                    .handle_login_from_ui(input, &mut self.trusted_device, peer)
+                    .await
+                {
+                    return false;
+                }
             }
             #[cfg(all(target_os = "windows", not(feature = "flutter")))]
             Data::ToggleClipboardFile => {
@@ -1750,7 +1746,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     .union
                 {
                     Some(login_response::Union::Error(err)) => {
-                        if !self.handler.handle_login_error(&err) {
+                        if !self.handler.handle_login_error(&err, &self.trusted_device) {
                             return false;
                         }
                     }

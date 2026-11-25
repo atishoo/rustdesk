@@ -24,6 +24,7 @@ enum UserStatus { kDisabled, kNormal, kUnverified }
 // to-do: The UserPayload does not contain all the fields of the user.
 // Is all the fields of the user needed?
 class UserPayload {
+  final int? id;
   String nickname = '';
   String avatar = '';
   String email = '';
@@ -33,7 +34,8 @@ class UserPayload {
   bool isAdmin = false;
 
   UserPayload.fromJson(Map<String, dynamic> json)
-      : nickname = json['nickname'] ?? '',
+      : id = json['id'] is int ? json['id'] as int : null,
+        nickname = json['nickname'] ?? '',
         avatar = json['avatar'] ?? '',
         email = json['email'] ?? '',
         note = json['note'] ?? '',
@@ -250,10 +252,12 @@ class AbProfile {
   String? note;
   dynamic info;
   int rule;
+  final String? accountBinding;
 
-  AbProfile(this.guid, this.name, this.owner, this.note, this.rule, this.info);
+  AbProfile(this.guid, this.name, this.owner, this.note, this.rule, this.info,
+      {this.accountBinding});
 
-  AbProfile.fromJson(Map<String, dynamic> json)
+  AbProfile.fromJson(Map<String, dynamic> json, {this.accountBinding})
       : guid = json['guid'] ?? '',
         name = json['name'] ?? '',
         owner = json['owner'] ?? '',

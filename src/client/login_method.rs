@@ -28,13 +28,40 @@ impl LoginConfigHandler {
     }
 }
 
+#[test]
+fn personal_address_book_password_is_not_saved_or_inherited() {
+    use crate::client::PasswordSource;
+    use base::message_proto::PeerInfo;
+    use hbb_common::{
+        config::PeerConfig,
+        sha2::{Digest, Sha256},
+    };
+
+    crate::trusted_devices::tests::initialize_config();
+    for request_approval in [false, true] {
+        let mut lc = LoginConfigHandler::default();
+        lc.id = format!("account-ab-password-test-{}", uuid::Uuid::new_v4());
+        lc.password = vec![3; 32];
+        lc.password_source = PasswordSource::PersonalAb("account-binding".into());
+        if request_approval {
+            assert!(lc.set_login_method("request-approval"));
+        }
+        let mut trust = crate::trusted_devices::client::Session::default();
+        trust.password_attempt = Some(Sha256::digest(&lc.password).into());
+        lc.handle_peer_info(&PeerInfo::default(), &trust);
+        let saved = PeerConfig::load(&lc.id).password;
+        PeerConfig::remove(&lc.id);
+        assert!(saved.is_empty());
+        assert!(lc.get_conn_token(true).is_none());
+    }
+}
+
 #[cfg(all(test, feature = "flutter"))]
 mod tests {
     use crate::{client, flutter::FlutterHandler, ui_session_interface::Session};
     use base::message_proto::{Hash, Message, PeerInfo};
     use hbb_common::{
         config::PeerConfig, protobuf::Message as _, rendezvous_proto::ConnType, tcp::FramedStream,
-        sha2::{Digest, Sha256},
         tokio, Stream,
     };
 
@@ -131,7 +158,11 @@ mod tests {
                     lc.conn_type = conn_type;
                     lc.config.password = vec![1; 32];
                     lc.password = vec![2; 32];
-                    lc.shared_password = Some("shared password".into());
+                    lc.shared_password = Some(client::SharedPassword {
+                        password: "shared password".into(),
+                        binding: "account-binding".into(),
+                        scope: None,
+                    });
                     let token = lc.get_conn_token(false);
                     if skip {
                         assert!(lc.set_login_method("request-approval"));
@@ -187,10 +218,13 @@ mod tests {
         assert!(peer.next_timeout(50).await.is_none());
         client::handle_login_from_ui(
             session.lc.clone(),
-            "administrator".into(),
-            "os password".into(),
-            String::new(),
-            false,
+            client::UiLogin::new(
+                "administrator".into(),
+                "os password".into(),
+                String::new(),
+                false,
+            ),
+            &session,
             &mut trust,
             &mut stream,
         )
@@ -202,32 +236,6 @@ mod tests {
         assert!(login.password.is_empty());
         assert_eq!(login.os_login.username, "administrator");
         assert_eq!(login.os_login.password, "os password");
-    }
-
-    #[test]
-    fn request_approval_does_not_save_personal_ab_password() {
-        for request_approval in [false, true] {
-            let mut lc = client::LoginConfigHandler::default();
-            lc.id = format!("request-approval-ab-password-test-{}", uuid::Uuid::new_v4());
-            lc.password = vec![3; 32];
-            lc.password_source = client::PasswordSource::PersonalAb(lc.password.clone());
-            if request_approval {
-                assert!(lc.set_login_method("request-approval"));
-            }
-            let mut trust = crate::trusted_devices::client::Session::default();
-            trust.password_attempt = Some(Sha256::digest(&lc.password).into());
-            lc.handle_peer_info(&PeerInfo::default(), &trust);
-            let saved = PeerConfig::load(&lc.id).password;
-            PeerConfig::remove(&lc.id);
-            assert_eq!(
-                saved,
-                if request_approval {
-                    Vec::new()
-                } else {
-                    lc.password
-                }
-            );
-        }
     }
 
     #[tokio::test]

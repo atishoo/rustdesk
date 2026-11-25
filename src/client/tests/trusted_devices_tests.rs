@@ -122,6 +122,7 @@ async fn another_connection_cannot_supply_this_streams_token(
         vec![1; 32],
         &mut old_connection,
         &mut peer,
+        &mut Default::default(),
     )
     .await
     .unwrap();

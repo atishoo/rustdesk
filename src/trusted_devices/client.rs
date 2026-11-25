@@ -1,5 +1,5 @@
 use super::TOKEN_BYTES;
-use base::message_proto::{login_response, message, LoginResponse, Message};
+use base::message_proto::{login_response, message, Hash, LoginResponse, Message, PortForward};
 use hbb_common::{
     anyhow::anyhow,
     bail,
@@ -14,7 +14,16 @@ use std::convert::TryInto;
 pub struct Session {
     credentials: Option<Credentials>,
     pub(crate) password_scope: Option<String>,
+    pub(crate) password_deployment: Option<String>,
+    pub(crate) password_rendezvous: Option<crate::client::ExpectedRendezvous>,
+    pub(crate) password_account: Option<String>,
     pub(crate) password_attempt: Option<[u8; 32]>,
+    pub(crate) password_revision: u64,
+    pub(crate) password_submission: u64,
+    pub(crate) login_request_sent: bool,
+    pub(crate) entered_password: bool,
+    pub(crate) challenge: Hash,
+    pub(crate) port_forward: Option<PortForward>,
     supported: bool,
     requested: bool,
     legacy: bool,
@@ -121,6 +130,12 @@ impl Session {
     }
 
     pub async fn response(&mut self, response: &LoginResponse) -> ResultType<bool> {
+        if matches!(
+            response.union.as_ref(),
+            Some(login_response::Union::Error(error)) if error == crate::client::LOGIN_MSG_NO_PASSWORD_ACCESS
+        ) {
+            self.password_attempt = None;
+        }
         self.supported = response.trusted_device_v2_supported && self.credentials.is_some();
         let Some(credentials) = self.credentials.clone() else {
             return Ok(false);

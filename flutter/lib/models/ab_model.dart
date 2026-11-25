@@ -14,6 +14,18 @@ import 'package:bot_toast/bot_toast.dart';
 import '../utils/http_service.dart' as http;
 import '../common.dart';
 
+bool _currentAccountBinding(String? binding) =>
+    binding == null ||
+    bind.mainGetLocalOption(key: 'access_token_deployment') == binding;
+
+bool _matchesAccountBinding(String? binding, Map<String, String> headers) {
+  if (binding == null) return true;
+  final token = bind.mainGetLocalOption(key: 'access_token');
+  return token.isNotEmpty &&
+      headers['Authorization'] == 'Bearer $token' &&
+      _currentAccountBinding(binding);
+}
+
 final syncAbOption = 'sync-ab-with-recent-sessions';
 bool shouldSyncAb() {
   return bind.mainGetLocalOption(key: syncAbOption) == 'Y';
@@ -372,7 +384,11 @@ class AbModel {
 
   Future<bool> _getSharedAbProfiles(List<AbProfile> profiles,
       {required bool quiet}) async {
+    final binding = bind.mainGetLocalOption(key: 'access_token_deployment');
     final (apiServer, accountHeaders) = await getAccountHttpContext();
+    if (binding.isEmpty || !_matchesAccountBinding(binding, accountHeaders)) {
+      return false;
+    }
     final api = "$apiServer/api/ab/shared/profiles";
     int? statusCode;
     try {
@@ -415,7 +431,7 @@ class AbModel {
             final data = json['data'];
             if (data is List) {
               for (final profile in data) {
-                final u = AbProfile.fromJson(profile);
+                final u = AbProfile.fromJson(profile, accountBinding: binding);
                 int index = profiles.indexWhere((e) => e.name == u.name);
                 if (index < 0) {
                   profiles.add(u);
@@ -519,17 +535,29 @@ class AbModel {
     return res;
   }
 
-  Future<bool> changePersonalHashPassword(String id, String hash) async {
+  Future<bool> changePersonalHashPassword(String id, String hash,
+      {String? accountBinding}) async {
+    if (!_currentAccountBinding(accountBinding)) {
+      return false;
+    }
     var ret = false;
     final personalAb = addressbooks[_personalAddressBookName];
     if (personalAb != null) {
-      ret = await personalAb.changePersonalHashPassword(id, hash);
+      ret = await personalAb.changePersonalHashPassword(id, hash,
+          accountBinding: accountBinding);
+      if (!_currentAccountBinding(accountBinding)) {
+        return false;
+      }
       await personalAb.pullAb(quiet: true);
     } else {
       final legacyAb = addressbooks[_legacyAddressBookName];
       if (legacyAb != null) {
-        ret = await legacyAb.changePersonalHashPassword(id, hash);
+        ret = await legacyAb.changePersonalHashPassword(id, hash,
+            accountBinding: accountBinding);
       }
+    }
+    if (!_currentAccountBinding(accountBinding)) {
+      return false;
     }
     _saveCache();
     return ret;
@@ -624,6 +652,8 @@ class AbModel {
   }
 
   Future<void> _syncFromRecentWithoutLock({bool push = true}) async {
+    final binding = bind.mainGetLocalOption(key: 'access_token_deployment');
+    if (binding.isEmpty) return;
     Future<List<Peer>> getRecentPeers() async {
       try {
         List<String> filteredPeerIDs;
@@ -639,7 +669,7 @@ class AbModel {
           if (filteredPeerIDs.isEmpty) return [];
         }
         final loadStr = await bind.mainLoadRecentPeersForAb(
-            filter: jsonEncode(filteredPeerIDs));
+            filter: jsonEncode([filteredPeerIDs, binding]));
         if (loadStr.isEmpty) {
           return [];
         }
@@ -660,10 +690,10 @@ class AbModel {
     try {
       if (!shouldSyncAb()) return;
       final recents = await getRecentPeers();
-      if (recents.isEmpty) return;
+      if (recents.isEmpty || !_currentAccountBinding(binding)) return;
       debugPrint("sync from recent, len: ${recents.length}");
       if (current.canWrite() && current.initialized) {
-        await current.syncFromRecent(recents);
+        await current.syncFromRecent(recents, accountBinding: binding);
       }
     } catch (e) {
       debugPrint('_syncFromRecentWithoutLock: $e');
@@ -931,26 +961,24 @@ class AbModel {
     _peerIdUpdateListeners.remove(key);
   }
 
-  String? getdefaultSharedPassword() {
-    if (current.isPersonal()) {
-      return null;
-    }
-    final profile = current.sharedProfile();
-    if (profile == null) {
-      return null;
-    }
-    try {
-      if (profile.info is Map) {
-        final password = (profile.info as Map)['password'];
-        if (password is String && password.isNotEmpty) {
-          return password;
-        }
+  String? sharedPasswordForPeer(Peer peer) {
+    final source = peer.sharedPasswordSource;
+    if (source == null || !_currentAccountBinding(source.$2)) return null;
+    final (guid, binding) = source;
+    var password = peer.password;
+    if (password.isEmpty) {
+      final profile = current.sharedProfile();
+      final info = profile?.info;
+      if (profile?.guid != guid ||
+          profile?.accountBinding != binding ||
+          info is! Map) {
+        return null;
       }
-      return null;
-    } catch (e) {
-      debugPrint("getdefaultSharedPassword: $e");
-      return null;
+      final fallback = info['password'];
+      if (fallback is! String || fallback.isEmpty) return null;
+      password = fallback;
     }
+    return isWeb ? password : jsonEncode([password, binding]);
   }
 
 // #endregion
@@ -1029,7 +1057,8 @@ abstract class BaseAb {
 
   Future<bool> changeNote({required String id, required String note});
 
-  Future<bool> changePersonalHashPassword(String id, String hash);
+  Future<bool> changePersonalHashPassword(String id, String hash,
+      {String? accountBinding});
 
   Future<bool> changeSharedPassword(String id, String password);
 
@@ -1057,7 +1086,7 @@ abstract class BaseAb {
 
   bool fullControl();
 
-  Future<void> syncFromRecent(List<Peer> recents);
+  Future<void> syncFromRecent(List<Peer> recents, {String? accountBinding});
 }
 
 class LegacyAb extends BaseAb {
@@ -1146,7 +1175,9 @@ class LegacyAb extends BaseAb {
   }
 
   Future<bool> pushAb(
-      {bool toastIfFail = true, bool toastIfSucc = true}) async {
+      {bool toastIfFail = true,
+      bool toastIfSucc = true,
+      String? accountBinding}) async {
     debugPrint("pushAb: toastIfFail:$toastIfFail, toastIfSucc:$toastIfSucc");
     if (!gFFI.userModel.isLogin) return false;
     pushError.value = '';
@@ -1155,6 +1186,7 @@ class LegacyAb extends BaseAb {
       //https: //stackoverflow.com/questions/68249333/flutter-getx-updating-item-in-children-list-is-not-reactive
       peers.refresh();
       final (apiServer, accountHeaders) = await getAccountHttpContext();
+      if (!_matchesAccountBinding(accountBinding, accountHeaders)) return false;
       final api = "$apiServer/api/ab";
       var authHeaders = Map<String, String>.of(accountHeaders);
       authHeaders['Content-Type'] = "application/json";
@@ -1264,7 +1296,8 @@ class LegacyAb extends BaseAb {
   }
 
   @override
-  Future<void> syncFromRecent(List<Peer> recents) async {
+  Future<void> syncFromRecent(List<Peer> recents,
+      {String? accountBinding}) async {
     bool peerSyncEqual(Peer a, Peer b) {
       return a.hash == b.hash &&
           a.username == b.username &&
@@ -1291,7 +1324,10 @@ class LegacyAb extends BaseAb {
       }
     }
     if (needSync) {
-      await pushAb(toastIfSucc: false, toastIfFail: false);
+      await pushAb(
+          toastIfSucc: false,
+          toastIfFail: false,
+          accountBinding: accountBinding);
       gFFI.abModel._refreshTab();
     }
     // Pull cannot be used for sync to avoid cyclic sync.
@@ -1306,7 +1342,8 @@ class LegacyAb extends BaseAb {
   }
 
   @override
-  Future<bool> changePersonalHashPassword(String id, String hash) async {
+  Future<bool> changePersonalHashPassword(String id, String hash,
+      {String? accountBinding}) async {
     bool changed = false;
     final it = peers.where((element) => element.id == id);
     if (it.isNotEmpty) {
@@ -1316,7 +1353,10 @@ class LegacyAb extends BaseAb {
       }
     }
     if (changed) {
-      return await pushAb(toastIfSucc: false, toastIfFail: false);
+      return await pushAb(
+          toastIfSucc: false,
+          toastIfFail: false,
+          accountBinding: accountBinding);
     }
     return true;
   }
@@ -1525,7 +1565,12 @@ class Ab extends BaseAb {
   }
 
   Future<bool> _fetchPeers(List<Peer> tmpPeers, {quiet = false}) async {
+    final binding = bind.mainGetLocalOption(key: 'access_token_deployment');
     final (apiServer, accountHeaders) = await getAccountHttpContext();
+    if (binding.isEmpty || !_matchesAccountBinding(binding, accountHeaders)) {
+      return false;
+    }
+    final guid = profile.guid;
     final api = "$apiServer/api/ab/peers";
     int? statusCode;
     try {
@@ -1543,7 +1588,7 @@ class Ab extends BaseAb {
             queryParameters: {
               'current': current.toString(),
               'pageSize': pageSize.toString(),
-              'ab': profile.guid,
+              'ab': guid,
             });
         var headers = Map<String, String>.of(accountHeaders);
         headers['Content-Type'] = "application/json";
@@ -1564,7 +1609,8 @@ class Ab extends BaseAb {
             final data = json['data'];
             if (data is List) {
               for (final profile in data) {
-                final u = Peer.fromJson(profile);
+                final u = Peer.fromJson(profile,
+                    sharedPasswordSource: personal ? null : (guid, binding));
                 int index = tmpPeers.indexWhere((e) => e.id == u.id);
                 if (index < 0) {
                   tmpPeers.add(u);
@@ -1742,9 +1788,11 @@ class Ab extends BaseAb {
     }
   }
 
-  Future<bool> _setPassword(Object bodyContent) async {
+  Future<bool> _setPassword(Object bodyContent,
+      {String? accountBinding}) async {
     try {
       final (apiServer, accountHeaders) = await getAccountHttpContext();
+      if (!_matchesAccountBinding(accountBinding, accountHeaders)) return false;
       final api = "$apiServer/api/ab/peer/update/${profile.guid}";
       var headers = Map<String, String>.of(accountHeaders);
       headers['Content-Type'] = "application/json";
@@ -1763,10 +1811,12 @@ class Ab extends BaseAb {
   }
 
   @override
-  Future<bool> changePersonalHashPassword(String id, String hash) async {
+  Future<bool> changePersonalHashPassword(String id, String hash,
+      {String? accountBinding}) async {
     if (!personal) return false;
     if (!peers.any((e) => e.id == id)) return true;
-    return await _setPassword({"id": id, "hash": hash});
+    return await _setPassword({"id": id, "hash": hash},
+        accountBinding: accountBinding);
   }
 
   @override
@@ -1776,10 +1826,12 @@ class Ab extends BaseAb {
   }
 
   @override
-  Future<void> syncFromRecent(List<Peer> recents) async {
+  Future<void> syncFromRecent(List<Peer> recents,
+      {String? accountBinding}) async {
     bool uiUpdate = false;
     bool saveCache = false;
     final (apiServer, accountHeaders) = await getAccountHttpContext();
+    if (!_matchesAccountBinding(accountBinding, accountHeaders)) return;
     final api = "$apiServer/api/ab/peer/update/${profile.guid}";
     var headers = Map<String, String>.of(accountHeaders);
     headers['Content-Type'] = "application/json";
@@ -1837,7 +1889,7 @@ class Ab extends BaseAb {
       if (uiUpdate && gFFI.abModel.currentName.value == profile.name) {
         peers.refresh();
       }
-      if (saveCache) {
+      if (saveCache && _matchesAccountBinding(accountBinding, accountHeaders)) {
         gFFI.abModel._saveCache();
       }
     } catch (err) {
@@ -2015,7 +2067,8 @@ class DummyAb extends BaseAb {
   }
 
   @override
-  Future<bool> changePersonalHashPassword(String id, String hash) async {
+  Future<bool> changePersonalHashPassword(String id, String hash,
+      {String? accountBinding}) async {
     return false;
   }
 
@@ -2068,7 +2121,8 @@ class DummyAb extends BaseAb {
   void setSharedProfile(AbProfile profile) {}
 
   @override
-  Future<void> syncFromRecent(List<Peer> recents) async {}
+  Future<void> syncFromRecent(List<Peer> recents,
+      {String? accountBinding}) async {}
 }
 
 Map<String, dynamic> _jsonDecodeRespMap(String body, int statusCode) {

@@ -1365,8 +1365,20 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 }
 
 pub fn main_set_local_option(key: String, value: String, login_deployment: Option<String>) {
-    if key == "access_token" {
-        crate::hbbs_http::store_account_token(value, login_deployment.as_deref().unwrap_or(""));
+    if matches!(key.as_str(), "access_token" | "authenticated_session") {
+        let (token, user_id) = if key == "authenticated_session" {
+            let Ok(session) = serde_json::from_str::<(String, Option<u64>)>(&value) else {
+                return;
+            };
+            session
+        } else {
+            (value, None)
+        };
+        crate::hbbs_http::store_account_token(
+            token,
+            login_deployment.as_deref().unwrap_or(""),
+            user_id,
+        );
         #[cfg(not(target_os = "ios"))]
         {
             let result = flutter::async_tasks::resolve_link_route(
@@ -1580,7 +1592,9 @@ pub fn main_forget_password(id: String) -> hbb_common::anyhow::Result<()> {
 }
 
 pub fn main_peer_has_password(id: String) -> bool {
-    peer_has_password(id)
+    peer_has_password(id.clone())
+        || crate::client::personal_ab_password_for(&id)
+            .is_some_and(|(_, binding)| crate::hbbs_http::password_account_is_current(&binding))
 }
 
 pub fn main_peer_exists(id: String) -> bool {
@@ -1612,7 +1626,7 @@ fn load_recent_peers(
     let mut peers_next = PeerConfig::batch_peers(vec_id_modified_time_path, from, to);
     // There may be less peers than the batch size.
     // But no need to consider this case, because it is a rare case.
-    let peers = peers_next.0.drain(..).map(|(id, _, p)| peer_to_map(id, p));
+    let peers = peers_next.0.drain(..).map(|(id, _, p)| peer_to_map(id, p, None));
     all_peers.extend(peers);
     peers_next.1
 }
@@ -1671,7 +1685,13 @@ pub fn main_load_recent_peers() {
 }
 
 pub fn main_load_recent_peers_for_ab(filter: String) -> String {
-    let id_filters = serde_json::from_str::<Vec<String>>(&filter).unwrap_or_default();
+    let Ok((id_filters, expected_binding)) = serde_json::from_str::<(Vec<String>, String)>(&filter)
+    else {
+        return String::new();
+    };
+    let owner = crate::hbbs_http::current_password_account()
+        .filter(|(binding, _)| *binding == expected_binding)
+        .map(|(_, owner)| owner);
     let id_filters = if id_filters.is_empty() {
         None
     } else {
@@ -1680,7 +1700,7 @@ pub fn main_load_recent_peers_for_ab(filter: String) -> String {
     if peer_config_path_ready() {
         let peers: Vec<HashMap<&str, String>> = PeerConfig::peers(id_filters)
             .drain(..)
-            .map(|(id, _, p)| peer_to_map(id, p))
+            .map(|(id, _, p)| peer_to_map(id, p, owner.as_deref()))
             .collect();
         return serde_json::ser::to_string(&peers).unwrap_or("".to_owned());
     }
@@ -1720,7 +1740,7 @@ pub fn main_load_fav_peers() {
         recent.append(&mut lan);
         let peers: Vec<HashMap<&str, String>> = recent
             .into_iter()
-            .map(|(id, _, p)| peer_to_map(id, p))
+            .map(|(id, _, p)| peer_to_map(id, p, None))
             .collect();
 
         push_to_flutter(serde_json::ser::to_string(&peers).unwrap_or("".to_owned()));

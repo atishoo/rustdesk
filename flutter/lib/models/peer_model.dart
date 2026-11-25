@@ -9,6 +9,7 @@ class Peer {
   final String id;
   String hash; // personal ab hash password
   String password; // shared ab password
+  final (String, String)? sharedPasswordSource;
   String username; // pc username
   String hostname;
   String platform;
@@ -29,7 +30,7 @@ class Peer {
     return id;
   }
 
-  Peer.fromJson(Map<String, dynamic> json)
+  Peer.fromJson(Map<String, dynamic> json, {this.sharedPasswordSource})
       : id = json['id'] ?? '',
         hash = json['hash'] ?? '',
         password = json['password'] ?? '',
@@ -104,6 +105,7 @@ class Peer {
     required this.loginName,
     required this.note,
     this.sameServer,
+    this.sharedPasswordSource,
   });
 
   Peer.loading()
@@ -143,6 +145,7 @@ class Peer {
         id: other.id,
         hash: other.hash,
         password: other.password,
+        sharedPasswordSource: other.sharedPasswordSource,
         username: other.username,
         hostname: other.hostname,
         platform: other.platform,

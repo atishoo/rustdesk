@@ -1608,7 +1608,7 @@ function login() {
                 on_2fa_check(data, loginContext, initialToken, attempt);
                 return;
             }
-            handler.store_account_token(data.access_token, loginContext[1]);
+            handler.store_account_token(data.access_token, loginContext[1], data.user ? "" + data.user.id : "");
             set_local_user_info(data.user);
             show_progress(-1);
             myIdMenu.update();
@@ -1666,7 +1666,7 @@ function on_2fa_check(last_msg, loginContext, initialToken, attempt) {
                         show_progress(false, data.error);
                         return;
                     }
-                    handler.store_account_token(data.access_token, loginContext[1]);
+                    handler.store_account_token(data.access_token, loginContext[1], data.user ? "" + data.user.id : "");
                     set_local_user_info(data.user);
                     show_progress(-1);
                     myIdMenu.update();
@@ -1688,7 +1688,7 @@ function on_2fa_check(last_msg, loginContext, initialToken, attempt) {
 }
 
 function reset_token() {
-    handler.store_account_token("", "");
+    handler.store_account_token("", "", "");
     accountTokenCurrent = false;
     handler.set_local_option("user_info", "");
     handler.set_local_option("selected-tags", "");

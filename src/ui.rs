@@ -709,8 +709,8 @@ impl UI {
         serde_json::to_string(&crate::hbbs_http::account_request_context()).unwrap_or_default()
     }
 
-    fn store_account_token(&self, token: String, deployment: String) {
-        crate::hbbs_http::store_account_token(token, &deployment);
+    fn store_account_token(&self, token: String, deployment: String, user_id: String) {
+        crate::hbbs_http::store_account_token(token, &deployment, user_id.parse().ok());
     }
     fn has_hwcodec(&self) -> bool {
         has_hwcodec()
@@ -794,7 +794,7 @@ impl sciter::EventHandler for UI {
         fn get_api_server();
         fn account_login_context();
         fn account_request_context();
-        fn store_account_token(String, String);
+        fn store_account_token(String, String, String);
         fn is_xfce();
         fn using_public_server();
         fn is_custom_client();

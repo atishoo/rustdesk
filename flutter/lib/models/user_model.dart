@@ -377,7 +377,9 @@ class UserModel {
       await _writeAccountState(isCurrent, () async {
         await checkLoginContext();
         await bind.mainSetLocalOption(
-            key: 'access_token', value: token, loginDeployment: deployment);
+            key: isWeb ? 'access_token' : 'authenticated_session',
+            value: isWeb ? token : jsonEncode([token, response.user?.id]),
+            loginDeployment: deployment);
         final user = response.user;
         if (user != null) {
           await _parseAndUpdateUser(user);

@@ -1244,7 +1244,11 @@ mod tests {
             fn msgbox(&self, _msgtype: &str, _title: &str, text: &str, _link: &str) {
                 self.0.lock().unwrap().push(text.to_owned());
             }
-            fn handle_login_error(&self, _err: &str) -> bool {
+            fn handle_login_error(
+                &self,
+                _err: &str,
+                _trust: &crate::trusted_devices::client::Session,
+            ) -> bool {
                 false
             }
             fn handle_peer_info(&self, _pi: PeerInfo, _trust: &crate::trusted_devices::client::Session) {}
@@ -1254,13 +1258,11 @@ mod tests {
             }
             async fn handle_login_from_ui(
                 &self,
-                _os_username: String,
-                _os_password: String,
-                _password: String,
-                _remember: bool,
+                _input: crate::client::UiLogin,
                 _trust: &mut crate::trusted_devices::client::Session,
                 _peer: &mut Stream,
-            ) {
+            ) -> bool {
+                false
             }
             async fn handle_test_delay(&self, t: TestDelay, peer: &mut Stream) {
                 if !t.from_client {

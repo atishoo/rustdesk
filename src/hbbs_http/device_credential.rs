@@ -422,16 +422,6 @@ pub(super) fn http_client(api: &str) -> ResultType<Client> {
     Ok(builder.build()?)
 }
 
-async fn account_context() -> Option<AccountContext> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let options = crate::ipc::get_options_async().await;
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    let options = Config::get_options();
-    let [token, binding] =
-        LocalConfig::get_options([super::ACCESS_TOKEN, super::ACCESS_TOKEN_DEPLOYMENT]);
-    account_context_for(&options, token, binding)
-}
-
 fn account_context_for(
     options: &HashMap<String, String>,
     token: String,
@@ -665,19 +655,32 @@ pub(crate) async fn run_host() {
     }
 }
 
+async fn resolve_context(route: &crate::client::ExpectedRendezvous) -> Option<AccountContext> {
+    let options = super::account_options_async().await;
+    let [token, binding] = super::confirmed_account_options()?;
+    let mut context = account_context_for(&options, token, binding)?;
+    if context.route.key != route.key
+        || super::password_deployment_for_route(&options, &route.server, &route.key)
+            .as_deref()
+            != Some(context.deployment.as_str())
+    {
+        return None;
+    }
+    context.scope = crate::client::password_scope(&route.server, &route.key)?;
+    context.route = route.clone();
+    Some(context)
+}
+
 pub(crate) async fn resolve(
     id: &str,
     salt: &str,
     peer_key: &[u8],
-    scope: Option<&str>,
-) -> Option<(Vec<u8>, crate::client::ExpectedRendezvous)> {
+    route: &crate::client::ExpectedRendezvous,
+) -> Option<(Vec<u8>, crate::client::ExpectedRendezvous, String)> {
     if peer_key.len() != 32 {
         return None;
     }
-    let context = account_context().await?;
-    if scope != Some(context.scope.as_str()) {
-        return None;
-    }
+    let context = resolve_context(route).await?;
     let peer_key = base64::encode(peer_key, base64::Variant::Original);
     let response = request(
         &context,
@@ -699,10 +702,10 @@ pub(crate) async fn resolve(
     let resolved: Resolved = response.json().await.ok()?;
     if resolved.salt != salt
         || resolved.peer_key != peer_key
-        || account_context().await.as_ref() != Some(&context)
+        || resolve_context(route).await.as_ref() != Some(&context)
     {
         return None;
     }
     let password = base64::decode(&resolved.password_hash, base64::Variant::Original).ok()?;
-    (password.len() == 32).then_some((password, context.route))
+    (password.len() == 32).then_some((password, context.route, context.binding))
 }

@@ -179,7 +179,7 @@ async fn connect_and_login(
         Client::start(id, key, token, conn_type, interface.clone()).await?;
     let mut trust = crate::trusted_devices::client::Session::new(
         &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
-    trust.password_scope = rendezvous.password_scope();
+    rendezvous.configure_password_route(&mut trust);
     interface.update_direct(Some(direct));
     if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
         if !confirm_insecure_connection(&interface, ui_receiver).await {
@@ -215,7 +215,7 @@ async fn connect_and_login(
                         }
                         Some(message::Union::LoginResponse(lr)) => match trust.respond(lr, &interface).await.union {
                             Some(login_response::Union::Error(err)) => {
-                                if !interface.handle_login_error(&err) {
+                                if !interface.handle_login_error(&err, &trust) {
                                     return Ok(None);
                                 }
                             }
@@ -241,7 +241,11 @@ async fn connect_and_login(
             d = ui_receiver.recv() => {
                 match d {
                     Some(Data::Login(login)) => match &challenge {
-                        Some(hash) => login_from_ui(&interface, hash, login, remote_host, remote_port, false, &mut trust, &mut stream).await,
+                        Some(hash) => {
+                            if !login_from_ui(&interface, hash, login, remote_host, remote_port, false, &mut trust, &mut stream).await {
+                                return Ok(None);
+                            }
+                        }
                         None => pending_login = Some(login),
                     },
                     // The Close is the listener's, which never sees it once the login has
@@ -274,11 +278,6 @@ async fn connect_and_login(
 }
 
 
-/// A mapping's login is built from the window's shared handler:
-/// `create_login_msg` reads `port_forward` and `port_forward_multiplex`,
-/// `handle_login_from_ui` reads `hash`. Mappings log in concurrently, so each
-/// fills them and sends under the window's turn lock, or one login carried
-/// another mapping's target or answered another's challenge.
 async fn login_with_hash(
     interface: &impl Interface,
     password: &str,
@@ -289,15 +288,14 @@ async fn login_with_hash(
     trust: &mut crate::trusted_devices::client::Session,
     stream: &mut Stream,
 ) -> bool {
-    let lc = interface.get_lch();
-    let turn = lc.read().unwrap().port_forward_login_turn.clone();
-    let _turn = turn.lock().await;
-    lc.write().unwrap().port_forward = (remote_host.to_owned(), remote_port);
-    lc.write().unwrap().port_forward_multiplex = mux;
+    trust.port_forward = Some(PortForward {
+        host: remote_host.to_owned(),
+        port: remote_port,
+        multiplex: mux,
+        ..Default::default()
+    });
     interface.handle_hash(password, hash, trust, stream).await
 }
-
-type UiLogin = (String, String, String, bool);
 
 /// This connection's `Hash`. The window's password prompt is broadcast to
 /// every mapping and can reach this one first, so a password typed while
@@ -317,8 +315,7 @@ async fn hash_arrived(
 ) -> bool {
     match pending_login {
         Some(login) => {
-            login_from_ui(interface, &hash, login, remote_host, remote_port, mux, trust, stream).await;
-            true
+            login_from_ui(interface, &hash, login, remote_host, remote_port, mux, trust, stream).await
         }
         None => login_with_hash(interface, password, hash, remote_host, remote_port, mux, trust, stream).await,
     }
@@ -335,20 +332,15 @@ async fn login_from_ui(
     mux: bool,
     trust: &mut crate::trusted_devices::client::Session,
     stream: &mut Stream,
-) {
-    let lc = interface.get_lch();
-    let turn = lc.read().unwrap().port_forward_login_turn.clone();
-    let _turn = turn.lock().await;
-    {
-        let mut lc = lc.write().unwrap();
-        lc.port_forward = (remote_host.to_owned(), remote_port);
-        lc.port_forward_multiplex = mux;
-        lc.set_hash(hash.clone());
-    }
-    let (os_username, os_password, password, remember) = login;
-    interface
-        .handle_login_from_ui(os_username, os_password, password, remember, trust, stream)
-        .await;
+) -> bool {
+    trust.challenge = hash.clone();
+    trust.port_forward = Some(PortForward {
+        host: remote_host.to_owned(),
+        port: remote_port,
+        multiplex: mux,
+        ..Default::default()
+    });
+    interface.handle_login_from_ui(login, trust, stream).await
 }
 
 /// The first accept of a multiplexed mapping. It logs in asking for the
@@ -433,7 +425,7 @@ async fn connect_and_login_mux(
         Client::start(id, key, token, conn_type, interface.clone()).await?;
     let mut trust = crate::trusted_devices::client::Session::new(
         &interface.get_lch().read().unwrap(), stream.is_secured(), pk.as_deref())?;
-    trust.password_scope = rendezvous.password_scope();
+    rendezvous.configure_password_route(&mut trust);
     interface.update_direct(Some(direct));
     if !stream.is_secured() && !crate::common::is_direct_ip_access(id) {
         if !confirm_insecure_connection(&interface, ui_receiver).await {
@@ -471,7 +463,7 @@ async fn connect_and_login_mux(
                         }
                         Some(message::Union::LoginResponse(lr)) => match trust.respond(lr, &interface).await.union {
                             Some(login_response::Union::Error(err)) => {
-                                if !interface.handle_login_error(&err) {
+                                if !interface.handle_login_error(&err, &trust) {
                                     return Ok(None);
                                 }
                             }
@@ -498,7 +490,11 @@ async fn connect_and_login_mux(
             d = ui_receiver.recv() => {
                 match d {
                     Some(Data::Login(login)) => match &challenge {
-                        Some(hash) => login_from_ui(&interface, hash, login, remote_host, remote_port, true, &mut trust, &mut stream).await,
+                        Some(hash) => {
+                            if !login_from_ui(&interface, hash, login, remote_host, remote_port, true, &mut trust, &mut stream).await {
+                                return Ok(None);
+                            }
+                        }
                         None => pending_login = Some(login),
                     },
                     // The Close is the listener's, which never sees it once the login has
@@ -654,7 +650,11 @@ mod login_tests {
     impl Interface for Ui {
         fn send(&self, _data: Data) {}
         fn msgbox(&self, _msgtype: &str, _title: &str, _text: &str, _link: &str) {}
-        fn handle_login_error(&self, _err: &str) -> bool {
+        fn handle_login_error(
+            &self,
+            _err: &str,
+            _trust: &crate::trusted_devices::client::Session,
+        ) -> bool {
             false
         }
         fn handle_peer_info(&self, _pi: PeerInfo, _trust: &crate::trusted_devices::client::Session) {}
@@ -665,23 +665,18 @@ mod login_tests {
         }
         async fn handle_login_from_ui(
             &self,
-            os_username: String,
-            os_password: String,
-            password: String,
-            remember: bool,
+            input: UiLogin,
             trust: &mut crate::trusted_devices::client::Session,
             peer: &mut Stream,
-        ) {
+        ) -> bool {
             crate::client::handle_login_from_ui(
                 self.lc.clone(),
-                os_username,
-                os_password,
-                password,
-                remember,
+                input,
+                self,
                 trust,
                 peer,
             )
-            .await.unwrap();
+            .await.unwrap()
         }
         async fn handle_test_delay(&self, _t: TestDelay, _peer: &mut Stream) {}
         fn get_lch(&self) -> Arc<RwLock<LoginConfigHandler>> {
@@ -773,11 +768,15 @@ mod login_tests {
             let ui = window();
             let (mut a, mut a_peer) = loopback().await;
             let (mut b, mut b_peer) = loopback().await;
-            // A's hash arrived last, so it is the one the handler holds.
+            // The two mappings answer one submission with their individual challenges.
             assert!(login_with_hash(&ui, "pw", hash("a"), "a", 1, false, &mut Default::default(), &mut a).await);
             login_at(&mut a_peer).await;
-            let typed = (String::new(), String::new(), "pw".to_owned(), false);
-            login_from_ui(&ui, &hash("b"), typed, "b", 2, false, &mut Default::default(), &mut b).await;
+            let typed = UiLogin::new(String::new(), String::new(), "pw".to_owned(), false);
+            let (mut a_trust, mut b_trust) = (Default::default(), Default::default());
+            login_from_ui(&ui, &hash("a"), typed.clone(), "a", 1, false, &mut a_trust, &mut a).await;
+            login_from_ui(&ui, &hash("b"), typed, "b", 2, false, &mut b_trust, &mut b).await;
+            assert_eq!(login_at(&mut a_peer).await.password, digest("a"));
+            assert_eq!(a_trust.password_revision, b_trust.password_revision);
             let lr = login_at(&mut b_peer).await;
             assert_eq!(lr.password, digest("b"));
             assert_eq!(target(&lr), ("b".to_owned(), 2));

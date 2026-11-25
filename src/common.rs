@@ -60,6 +60,7 @@ pub const PLATFORM_ANDROID: &str = "Android";
 
 pub const TIMER_OUT: Duration = Duration::from_secs(1);
 pub(crate) const API_LOG_INTERVAL: Duration = Duration::from_secs(600);
+pub(crate) const PUBLIC_API_SERVER: &str = "https://admin.rustdesk.com";
 pub const DEFAULT_KEEP_ALIVE: i32 = 60_000;
 
 const MIN_VER_MULTI_UI_SESSION: &str = "1.2.4";
@@ -1308,7 +1309,7 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    PUBLIC_API_SERVER.to_owned()
 }
 
 #[inline]
