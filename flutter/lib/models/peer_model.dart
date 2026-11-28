@@ -14,6 +14,7 @@ class Peer {
   String hostname;
   String platform;
   String alias;
+  final int? aliasRowId;
   List<dynamic> tags;
   bool forceAlwaysRelay = false;
   String rdpPort;
@@ -38,6 +39,7 @@ class Peer {
         hostname = json['hostname'] ?? '',
         platform = json['platform'] ?? '',
         alias = json['alias'] ?? '',
+        aliasRowId = json['alias_row_id'],
         tags = json['tags'] ?? [],
         forceAlwaysRelay = json['forceAlwaysRelay'] == 'true',
         rdpPort = json['rdpPort'] ?? '',
@@ -86,6 +88,8 @@ class Peer {
       "username": username,
       "hostname": hostname,
       "platform": platform,
+      'alias': alias,
+      'alias_row_id': aliasRowId,
       "login_name": loginName,
     };
   }
@@ -104,6 +108,7 @@ class Peer {
     required this.rdpUsername,
     required this.loginName,
     required this.note,
+    this.aliasRowId,
     this.sameServer,
     this.sharedPasswordSource,
   });
@@ -132,6 +137,7 @@ class Peer {
         hostname == other.hostname &&
         platform == other.platform &&
         alias == other.alias &&
+        aliasRowId == other.aliasRowId &&
         tags.equals(other.tags) &&
         forceAlwaysRelay == other.forceAlwaysRelay &&
         rdpPort == other.rdpPort &&
@@ -150,6 +156,7 @@ class Peer {
         hostname: other.hostname,
         platform: other.platform,
         alias: other.alias,
+        aliasRowId: other.aliasRowId,
         tags: other.tags.toList(),
         forceAlwaysRelay: other.forceAlwaysRelay,
         rdpPort: other.rdpPort,

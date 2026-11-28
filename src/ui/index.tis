@@ -1583,7 +1583,7 @@ function login() {
             show_progress(false, translate("Email") + ": " + translate("Invalid format"));
             return " ";
         }
-        var pass = (res.password || '').trim();
+        var pass = res.password || '';
         if (!pass) {
             show_progress(false, translate("Password missed"));
             return " ";

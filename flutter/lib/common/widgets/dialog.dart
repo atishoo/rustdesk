@@ -1457,7 +1457,7 @@ showSetOSPassword(
   var autoLogin =
       await bind.sessionGetOption(sessionId: sessionId, arg: 'auto-login') !=
           '';
-  controller.text = osPassword;
+  controller.text = osPassword ?? '';
   dialogManager.show((setState, close, context) {
     closeWithCallback([dynamic]) {
       close();
@@ -2160,24 +2160,31 @@ void editAbPeerNoteDialog(String id) {
 void renameDialog(
     {required String oldName,
     FormFieldValidator<String>? validator,
-    required ValueChanged<String> onSubmit,
+    required FutureOr<void> Function(String) onSubmit,
     Function? onCancel}) async {
   RxBool isInProgress = false.obs;
   var controller = TextEditingController(text: oldName);
   final formKey = GlobalKey<FormState>();
   gFFI.dialogManager.show((setState, close, context) {
     submit() async {
+      if (isInProgress.value) return;
       String text = controller.text.trim();
       if (validator != null && formKey.currentState?.validate() == false) {
         return;
       }
       isInProgress.value = true;
-      onSubmit(text);
-      close();
-      isInProgress.value = false;
+      try {
+        await onSubmit(text);
+        if (context.mounted) close();
+      } catch (error) {
+        showToast('${translate('Failed')}\n$error');
+      } finally {
+        isInProgress.value = false;
+      }
     }
 
     cancel() {
+      if (isInProgress.value) return;
       onCancel?.call();
       close();
     }

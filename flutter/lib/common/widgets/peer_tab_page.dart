@@ -65,7 +65,7 @@ class _PeerTabPageState extends State<PeerTabPage>
       MyGroup(
         menuPadding: _menuPadding(),
       ),
-      ({dynamic hint}) => gFFI.groupModel.pull(force: hint == null),
+      ({dynamic hint}) => gFFI.groupModel.pull(quiet: hint != null),
     ),
   ];
   RelativeRect? mobileTabContextMenuPos;

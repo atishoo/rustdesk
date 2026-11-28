@@ -134,10 +134,22 @@ class _PeerCardState extends State<_PeerCard>
     return peerTabShowNote(widget.tab) && peer.note.isNotEmpty;
   }
 
-  makeChild(bool isPortrait, Peer peer) {
+  (String, String) _peerLabels(Peer peer) {
+    final id = formatID(peer.id);
     final name = hideUsernameOnCard == true
         ? peer.hostname
         : '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';
+    if (widget.tab == PeerTabIndex.group) {
+      if (peer.alias.isNotEmpty) {
+        return (peer.alias, name.isEmpty ? id : '$id · $name');
+      }
+      if (peer.hostname.isNotEmpty) return (peer.hostname, id);
+    }
+    return (peer.alias.isEmpty ? id : peer.alias, name);
+  }
+
+  makeChild(bool isPortrait, Peer peer) {
+    final (title, name) = _peerLabels(peer);
     final greyStyle = TextStyle(
         fontSize: 11,
         color: Theme.of(context).textTheme.titleLarge?.color?.withOpacity(0.6));
@@ -189,7 +201,7 @@ class _PeerCardState extends State<_PeerCard>
                         getOnline(isPortrait ? 4 : 8, peer.online),
                         Expanded(
                             child: Text(
-                          peer.alias.isEmpty ? formatID(peer.id) : peer.alias,
+                          title,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.titleSmall,
                         )),
@@ -285,9 +297,7 @@ class _PeerCardState extends State<_PeerCard>
       BuildContext context, Peer peer, Rx<BoxDecoration?> deco) {
     hideUsernameOnCard ??=
         bind.mainGetBuildinOption(key: kHideUsernameOnCard) == 'Y';
-    final name = hideUsernameOnCard == true
-        ? peer.hostname
-        : '${peer.username}${peer.username.isNotEmpty && peer.hostname.isNotEmpty ? '@' : ''}${peer.hostname}';
+    final (title, name) = _peerLabels(peer);
     final child = Card(
       color: Colors.transparent,
       elevation: 0,
@@ -371,7 +381,7 @@ class _PeerCardState extends State<_PeerCard>
                         getOnline(8, peer.online),
                         Expanded(
                             child: Text(
-                          peer.alias.isEmpty ? formatID(peer.id) : peer.alias,
+                          title,
                           overflow: TextOverflow.ellipsis,
                           style: Theme.of(context).textTheme.titleSmall,
                         )),
@@ -868,12 +878,16 @@ abstract class BasePeerCard extends StatelessWidget {
         style: style,
       ),
       proc: () async {
-        String oldName = await _getAlias(id);
+        final oldName =
+            tab == PeerTabIndex.group ? peer.alias : await _getAlias(id);
         renameDialog(
             oldName: oldName,
             onSubmit: (String newName) async {
               if (newName != oldName) {
-                if (tab == PeerTabIndex.ab) {
+                if (tab == PeerTabIndex.group) {
+                  await gFFI.groupModel.changeAlias(peer, newName);
+                  showToast(translate('Successful'));
+                } else if (tab == PeerTabIndex.ab) {
                   await gFFI.abModel.changeAlias(id: id, alias: newName);
                   await bind.mainSetPeerAlias(id: id, alias: newName);
                 } else {
@@ -1353,11 +1367,9 @@ class MyGroupPeerCard extends BasePeerCard {
     if (isWindows) {
       menuItems.add(_createShortCutAction(peer.id));
     }
-    // menuItems.add(MenuEntryDivider());
-    // menuItems.add(_renameAction(peer.id));
-    // if (await bind.mainPeerHasPassword(id: peer.id)) {
-    //   menuItems.add(_unrememberPasswordAction(peer.id));
-    // }
+    if (peer.aliasRowId != null) {
+      menuItems.add(_renameAction(peer.id));
+    }
     if (gFFI.userModel.email.isNotEmpty) {
       menuItems.add(_addToAb(peer));
     }

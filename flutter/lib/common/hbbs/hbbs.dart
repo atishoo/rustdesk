@@ -74,6 +74,8 @@ class PeerPayload {
   String user = '';
   String user_email = '';
   String note = '';
+  final String alias;
+  final int? aliasRowId;
 
   PeerPayload.fromJson(Map<String, dynamic> json)
       : id = json['id'] ?? '',
@@ -81,7 +83,11 @@ class PeerPayload {
         status = json['status'],
         user = json['user'] ?? '',
         user_email = json['user_email'] ?? '',
-        note = json['note'] ?? '';
+        note = json['note'] ?? '',
+        alias = json['alias'] is String ? json['alias'] : '',
+        aliasRowId = json['can_edit_alias'] == true && json['row_id'] is int
+            ? json['row_id']
+            : null;
 
   static Peer toPeer(PeerPayload p) {
     return Peer.fromJson({
@@ -91,6 +97,8 @@ class PeerPayload {
       "platform": _platform(p.info['os']),
       "hostname": p.info['device_name'],
       "note": p.note,
+      'alias': p.alias,
+      'alias_row_id': p.aliasRowId,
     });
   }
 

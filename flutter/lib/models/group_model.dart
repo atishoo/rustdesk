@@ -26,6 +26,7 @@ class GroupModel {
   var _queuedPullQuiet = true;
   var _pullStale = false;
   List<String>? _pullContext;
+  List<String>? _peersContext;
 
   Future<bool> _pullIsCurrent() async {
     final context = _pullContext;
@@ -138,6 +139,7 @@ class GroupModel {
     }
     // recover online
     final oldOnlineIDs = peers.where((e) => e.online).map((e) => e.id).toList();
+    _peersContext = _pullContext;
     peers.value = tmpPeers;
     peers
         .where((e) => oldOnlineIDs.contains(e.id))
@@ -147,8 +149,37 @@ class GroupModel {
     _callbackPeerUpdate();
   }
 
+  Future<void> changeAlias(Peer peer, String alias) async {
+    final [api, token] = await bind.mainAccountRequestContext();
+    final context = _peersContext;
+    final rowId = peer.aliasRowId;
+    if (context == null ||
+        context[0] != api ||
+        context[1] != token ||
+        token.isEmpty ||
+        rowId == null ||
+        rowId <= 0 ||
+        !peers.contains(peer)) {
+      throw translate('Please try later');
+    }
+    final response = await http.put(
+      Uri.parse('$api/api/peer/alias'),
+      headers: {
+        'Authorization': 'Bearer $token',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'row_id': rowId, 'alias': alias}),
+    );
+    if (response.statusCode != 204) {
+      final result =
+          _jsonDecodeResp(decode_http_response(response), response.statusCode);
+      throw result['error'] ?? 'HTTP ${response.statusCode}';
+    }
+    await pull(quiet: true);
+  }
+
   Future<bool> _getUsers(List<UserPayload> tmpUsers) async {
-    final (apiServer, accountHeaders) = await getAccountHttpContext();
+    final [apiServer, token] = _pullContext!;
     final api = "$apiServer/api/users";
     try {
       var uri0 = Uri.parse(api);
@@ -168,8 +199,8 @@ class GroupModel {
               'accessible': '',
               'status': '1',
             });
-        final resp = await http.get(uri,
-            headers: Map<String, String>.of(accountHeaders));
+        final resp =
+            await http.get(uri, headers: {'Authorization': 'Bearer $token'});
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
             _jsonDecodeResp(decode_http_response(resp), resp.statusCode);
@@ -215,7 +246,7 @@ class GroupModel {
 
   Future<bool> _getPeers(List<Peer> tmpPeers) async {
     try {
-      final (apiServer, accountHeaders) = await getAccountHttpContext();
+      final [apiServer, token] = _pullContext!;
       final api = "$apiServer/api/peers";
       var uri0 = Uri.parse(api);
       final pageSize = 100;
@@ -235,8 +266,8 @@ class GroupModel {
             path: uri0.path,
             port: uri0.port,
             queryParameters: queryParameters);
-        final resp = await http.get(uri,
-            headers: Map<String, String>.of(accountHeaders));
+        final resp =
+            await http.get(uri, headers: {'Authorization': 'Bearer $token'});
         _statusCode = resp.statusCode;
 
         Map<String, dynamic> json =
@@ -290,8 +321,11 @@ class GroupModel {
 
   void _saveCache() {
     try {
+      final context = _peersContext;
+      if (context == null || context != _pullContext) return;
       final map = (<String, dynamic>{
-        "access_token": bind.mainGetLocalOption(key: 'access_token'),
+        'api_server': context[0],
+        "access_token": context[1],
         "users": users.map((e) => e.toGroupCacheJson()).toList(),
         'peers': peers.map((e) => e.toGroupCacheJson()).toList()
       });
@@ -318,7 +352,12 @@ class GroupModel {
         return;
       }
       final data = jsonDecode(cache);
-      if (data == null || data['access_token'] != access_token) return;
+      if (data == null ||
+          data['api_server'] != context[0] ||
+          data['access_token'] != access_token) {
+        return;
+      }
+      _peersContext = context;
       users.clear();
       peers.clear();
       if (data['users'] is List) {
@@ -339,6 +378,7 @@ class GroupModel {
 
   reset() async {
     initialized = false;
+    _peersContext = null;
     groupLoadError.value = '';
     users.clear();
     peers.clear();
